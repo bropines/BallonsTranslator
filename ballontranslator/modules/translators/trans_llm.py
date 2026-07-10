@@ -61,6 +61,12 @@ class LLMTranslator(BaseTranslator):
             "display_name": "Proxy",
             "description": "Proxy address used for the OpenAI-compatible client.",
         },
+        "custom_prompt_override": {
+            "value": "",
+            "type": "editor",
+            "display_name": "Custom Prompt Override",
+            "description": "Additional translation instructions/rules (e.g. 'translate AAA to BBB'). If left empty, only the profile prompt is used.",
+        },
     }
 
     def _setup_translator(self):
@@ -110,6 +116,10 @@ class LLMTranslator(BaseTranslator):
             raise RuntimeError(f'LLM profile "{profile.name}" does not have text translation enabled.')
         self._text_model(profile)
         return profile
+
+    @property
+    def custom_prompt_override(self) -> str:
+        return str(self.get_param_value('custom_prompt_override') or '').strip()
 
     @staticmethod
     def _text_model(profile: LLMProfile) -> str:
@@ -192,6 +202,13 @@ class LLMTranslator(BaseTranslator):
 
     def _system_prompt(self, profile: LLMProfile, to_lang: str) -> str:
         prompt = str(profile.prompt or '').strip()
+        custom = self.custom_prompt_override
+        if custom:
+            if prompt:
+                prompt = prompt + "\n" + custom
+            else:
+                prompt = custom
+
         contract = (
             f"You are an expert translator. Translate every source string into {to_lang}.\n"
             'Return only valid JSON in this shape:\n'

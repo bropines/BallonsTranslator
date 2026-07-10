@@ -158,6 +158,8 @@ class LLMProfile(Config):
     thinking_level: str = "None"
     thinking_level_options: List[str] = field(default_factory=lambda: list(THINKING_LEVEL_OPTIONS))
     prompt: str = DEFAULT_TRANSLATION_PROMPT
+    ocr_prompt: str = ""
+    inpaint_prompt: str = ""
     invalid_repeat_count: int = 2
     max_tokens: int = 8192
     temperature: float = 0.1

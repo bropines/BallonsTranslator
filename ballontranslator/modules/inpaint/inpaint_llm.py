@@ -528,11 +528,12 @@ class LLMInpaint(InpainterBase):
         profile = self.profile
         retry_attempt = 0
         mask_original = (mask > 127)[..., None].astype(np.uint8)
+        prompt = str(profile.inpaint_prompt or '').strip() or None
         while True:
             if self.stop_event is not None and self.stop_event.is_set():
                 raise LLMRequestStopped()
             try:
-                result = self._request_inpaint(profile, img)
+                result = self._request_inpaint(profile, img, prompt=prompt)
                 if result.shape[:2] != img.shape[:2]:
                     result = cv2.resize(result, (img.shape[1], img.shape[0]), interpolation=cv2.INTER_LINEAR)
                 result = result.astype(np.uint8, copy=False)

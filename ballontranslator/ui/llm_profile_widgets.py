@@ -73,6 +73,8 @@ PROFILE_PARAM_DEFS = [
     ('low_vram_mode', 'checkbox'),
     ('json_schema_response_format', 'checkbox'),
     ('prompt', 'editor'),
+    ('ocr_prompt', 'editor'),
+    ('inpaint_prompt', 'editor'),
 ]
 
 PROFILE_FIELD_TYPES = get_type_hints(LLMProfile)
@@ -317,7 +319,9 @@ class ProfileCardWidget(QGroupBox):
             'frequency_penalty': self.tr('Frequency Penalty'),
             'presence_penalty': self.tr('Presence Penalty'),
             'json_schema_response_format': self.tr('JSON Schema Response'),
-            'prompt': self.tr('Prompt'),
+            'prompt': self.tr('Translation Prompt'),
+            'ocr_prompt': self.tr('OCR Prompt'),
+            'inpaint_prompt': self.tr('Inpainter Prompt'),
             'low_vram_mode': self.tr('Low VRAM Mode'),
         }
         self.profile_param_descriptions = {
@@ -328,7 +332,9 @@ class ProfileCardWidget(QGroupBox):
             'image_model': self.tr('Model used by LLMInpaint for image cleanup.'),
             'vision_detail_level': self.tr('Image detail level sent to vision-capable providers.'),
             'thinking_level': self.tr('Reasoning effort sent only when it is not None.'),
-            'prompt': self.tr('Additional translation instructions for style and wording.'),
+            'prompt': self.tr('Default translation instructions for style and wording.'),
+            'ocr_prompt': self.tr('Custom instructions for page-level or block-level OCR.'),
+            'inpaint_prompt': self.tr('Custom instructions for image cleanup/inpainting.'),
             'invalid_repeat_count': self.tr('Retries when response count does not match source count.'),
             'max_tokens': self.tr('Maximum generated response tokens, not input/context tokens.'),
             'temperature': self.tr('Sampling temperature.'),
