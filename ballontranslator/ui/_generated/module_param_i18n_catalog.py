@@ -94,17 +94,47 @@ MODULE_PARAM_CATALOG = {
     ('ocr', 'LLMOCR', '', 'description'): {
         "source": 'OCR using the selected vision-capable LLM profile.', "translate": lambda: QCoreApplication.translate('ModuleParamTranslator', 'OCR using the selected vision-capable LLM profile.'),
     },
+    ('ocr', 'LLMOCR', 'box_color', 'description'): {
+        "source": 'Color of the bounding boxes drawn on the page overlay.', "translate": lambda: QCoreApplication.translate('ModuleParamTranslator', 'Color of the bounding boxes drawn on the page overlay.'),
+    },
+    ('ocr', 'LLMOCR', 'box_color', 'display_name'): {
+        "source": 'Box Color', "translate": lambda: QCoreApplication.translate('ModuleParamTranslator', 'Box Color'),
+    },
+    ('ocr', 'LLMOCR', 'censorship', 'description'): {
+        "source": 'Black out all non-text areas of the page image before sending it to the Vision LLM.', "translate": lambda: QCoreApplication.translate('ModuleParamTranslator', 'Black out all non-text areas of the page image before sending it to the Vision LLM.'),
+    },
+    ('ocr', 'LLMOCR', 'censorship', 'display_name'): {
+        "source": 'Censorship (Blackout Image)', "translate": lambda: QCoreApplication.translate('ModuleParamTranslator', 'Censorship (Blackout Image)'),
+    },
+    ('ocr', 'LLMOCR', 'custom_prompt_override', 'description'): {
+        "source": 'Additional OCR instructions/rules. If left empty, the default OCR prompt is used.', "translate": lambda: QCoreApplication.translate('ModuleParamTranslator', 'Additional OCR instructions/rules. If left empty, the default OCR prompt is used.'),
+    },
+    ('ocr', 'LLMOCR', 'custom_prompt_override', 'display_name'): {
+        "source": 'Custom Prompt Override', "translate": lambda: QCoreApplication.translate('ModuleParamTranslator', 'Custom Prompt Override'),
+    },
     ('ocr', 'LLMOCR', 'delay', 'description'): {
         "source": 'Delay between LLM OCR requests in seconds.', "translate": lambda: QCoreApplication.translate('ModuleParamTranslator', 'Delay between LLM OCR requests in seconds.'),
     },
     ('ocr', 'LLMOCR', 'delay', 'display_name'): {
         "source": 'Delay', "translate": lambda: QCoreApplication.translate('ModuleParamTranslator', 'Delay'),
     },
+    ('ocr', 'LLMOCR', 'font_scale', 'description'): {
+        "source": 'Scale of the numbers overlaid next to each box.', "translate": lambda: QCoreApplication.translate('ModuleParamTranslator', 'Scale of the numbers overlaid next to each box.'),
+    },
+    ('ocr', 'LLMOCR', 'font_scale', 'display_name'): {
+        "source": 'Font Scale', "translate": lambda: QCoreApplication.translate('ModuleParamTranslator', 'Font Scale'),
+    },
     ('ocr', 'LLMOCR', 'max requests per minute', 'description'): {
         "source": 'Global request limit for LLM OCR.', "translate": lambda: QCoreApplication.translate('ModuleParamTranslator', 'Global request limit for LLM OCR.'),
     },
     ('ocr', 'LLMOCR', 'max requests per minute', 'display_name'): {
         "source": 'Max Requests Per Minute', "translate": lambda: QCoreApplication.translate('ModuleParamTranslator', 'Max Requests Per Minute'),
+    },
+    ('ocr', 'LLMOCR', 'page_level_ocr', 'description'): {
+        "source": 'Process the entire page in a single request with numbered boxes instead of cropped slices.', "translate": lambda: QCoreApplication.translate('ModuleParamTranslator', 'Process the entire page in a single request with numbered boxes instead of cropped slices.'),
+    },
+    ('ocr', 'LLMOCR', 'page_level_ocr', 'display_name'): {
+        "source": 'Page-Level OCR', "translate": lambda: QCoreApplication.translate('ModuleParamTranslator', 'Page-Level OCR'),
     },
     ('ocr', 'LLMOCR', 'proxy', 'description'): {
         "source": 'Proxy address used for the OpenAI-compatible client.', "translate": lambda: QCoreApplication.translate('ModuleParamTranslator', 'Proxy address used for the OpenAI-compatible client.'),
@@ -123,6 +153,12 @@ MODULE_PARAM_CATALOG = {
     },
     ('ocr', 'LLMOCR', 'retry timeout', 'display_name'): {
         "source": 'Retry Timeout', "translate": lambda: QCoreApplication.translate('ModuleParamTranslator', 'Retry Timeout'),
+    },
+    ('ocr', 'LLMOCR', 'sort_by_llm', 'description'): {
+        "source": 'Re-order text blocks on the page based on the layout analysis and reading order determined by the Vision LLM.', "translate": lambda: QCoreApplication.translate('ModuleParamTranslator', 'Re-order text blocks on the page based on the layout analysis and reading order determined by the Vision LLM.'),
+    },
+    ('ocr', 'LLMOCR', 'sort_by_llm', 'display_name'): {
+        "source": 'Sort by LLM Reading Order', "translate": lambda: QCoreApplication.translate('ModuleParamTranslator', 'Sort by LLM Reading Order'),
     },
     ('ocr', 'PaddleOCRVLManga', 'device', 'display_name'): {
         "source": 'device', "translate": lambda: QCoreApplication.translate('ModuleParamTranslator', 'device'),
@@ -567,6 +603,12 @@ MODULE_PARAM_CATALOG = {
     },
     ('translator', 'LLMTranslator', '', 'description'): {
         "source": 'Translate using the selected text-capable LLM profile.', "translate": lambda: QCoreApplication.translate('ModuleParamTranslator', 'Translate using the selected text-capable LLM profile.'),
+    },
+    ('translator', 'LLMTranslator', 'custom_prompt_override', 'description'): {
+        "source": "Additional translation instructions/rules (e.g. 'translate AAA to BBB'). If left empty, only the profile prompt is used.", "translate": lambda: QCoreApplication.translate('ModuleParamTranslator', "Additional translation instructions/rules (e.g. 'translate AAA to BBB'). If left empty, only the profile prompt is used."),
+    },
+    ('translator', 'LLMTranslator', 'custom_prompt_override', 'display_name'): {
+        "source": 'Custom Prompt Override', "translate": lambda: QCoreApplication.translate('ModuleParamTranslator', 'Custom Prompt Override'),
     },
     ('translator', 'LLMTranslator', 'delay', 'description'): {
         "source": 'Delay between LLM requests in seconds.', "translate": lambda: QCoreApplication.translate('ModuleParamTranslator', 'Delay between LLM requests in seconds.'),

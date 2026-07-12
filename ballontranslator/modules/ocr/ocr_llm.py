@@ -19,17 +19,21 @@ def create_annotated_page(
     blk_list: List[TextBlock],
     box_color: tuple = (0, 0, 255),
     font_scale: float = 1.2,
-    thickness: int = 3
+    thickness: int = 3,
+    censored: bool = True
 ) -> np.ndarray:
-    annotated = np.zeros_like(img)
-    im_h, im_w = img.shape[:2]
-    # Copy block contents to mask
-    for i, blk in enumerate(blk_list):
-        x1, y1, x2, y2 = blk.xyxy
-        y1c, y2c = max(0, y1), min(im_h, y2)
-        x1c, x2c = max(0, x1), min(im_w, x2)
-        if y1c < y2c and x1c < x2c:
-            annotated[y1c:y2c, x1c:x2c] = img[y1c:y2c, x1c:x2c]
+    if censored:
+        annotated = np.zeros_like(img)
+        im_h, im_w = img.shape[:2]
+        # Copy block contents to mask
+        for i, blk in enumerate(blk_list):
+            x1, y1, x2, y2 = blk.xyxy
+            y1c, y2c = max(0, y1), min(im_h, y2)
+            x1c, x2c = max(0, x1), min(im_w, x2)
+            if y1c < y2c and x1c < x2c:
+                annotated[y1c:y2c, x1c:x2c] = img[y1c:y2c, x1c:x2c]
+    else:
+        annotated = img.copy()
 
     # Draw boxes and number labels
     for i, blk in enumerate(blk_list):
@@ -108,6 +112,12 @@ class LLMOCR(OCRBase):
             "display_name": "Page-Level OCR",
             "description": "Process the entire page in a single request with numbered boxes instead of cropped slices.",
         },
+        "censorship": {
+            "value": True,
+            "type": "checkbox",
+            "display_name": "Censorship (Blackout Image)",
+            "description": "Black out all non-text areas of the page image before sending it to the Vision LLM.",
+        },
         "box_color": {
             "value": "Red",
             "type": "selector",
@@ -163,6 +173,10 @@ class LLMOCR(OCRBase):
     @property
     def page_level_ocr(self) -> bool:
         return bool(self.get_param_value('page_level_ocr'))
+
+    @property
+    def censorship(self) -> bool:
+        return bool(self.get_param_value('censorship'))
 
     @property
     def box_color_rgb(self) -> tuple:
@@ -413,7 +427,8 @@ class LLMOCR(OCRBase):
             blk_list,
             box_color=self.box_color_rgb,
             font_scale=self.font_scale,
-            thickness=3
+            thickness=3,
+            censored=self.censorship
         )
 
         profile_ocr_p = str(self.profile.ocr_prompt or '').strip()
@@ -421,8 +436,9 @@ class LLMOCR(OCRBase):
         if self.custom_prompt_override:
             base_prompt = base_prompt + "\n" + self.custom_prompt_override
 
+        img_layout_desc = "all non-text areas are blacked out" if self.censorship else "the full page layout is visible"
         prompt = (
-            "The input image is a page from a comic/manga where all non-text areas are blacked out. "
+            f"The input image is a page from a comic/manga where {img_layout_desc}. "
             f"There are {len(blk_list)} text blocks labeled with colored boxes and numbers from 1 to {len(blk_list)}.\n\n"
             "Your task is to perform OCR on each block individually and return the text for each block number.\n"
             "CRITICAL: Analyze the visual panel layout and flow of speech bubbles on the page to determine the correct reading order (typically right-to-left, top-to-bottom for Japanese manga). "
