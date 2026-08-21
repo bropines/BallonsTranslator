@@ -26,6 +26,7 @@ ordered-set
 opencc-python-reimplemented
 colorama
 spacy-pkuseg
+pyphen>=0.14.0
 pywin32; sys_platform == 'win32'
 brotlicffi; sys_platform == 'win32'
 pyobjc-core; sys_platform == 'darwin'

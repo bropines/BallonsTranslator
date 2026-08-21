@@ -756,6 +756,45 @@ class FontFormatPanel(Widget):
             )
         )
 
+        self.shapeChecker = QFontChecker(self)
+        self.shapeChecker.setObjectName("FontShapeChecker")
+        self.shapeChecker.setToolTip(
+            self.tr("Toggle Elliptical / Rectangular Balloon Shape")
+        )
+        self.shapeChecker.clicked.connect(
+            lambda: self.on_param_changed(
+                'shape_type',
+                'ellipse' if self.shapeChecker.isChecked() else 'rect',
+            )
+        )
+
+        self.hyphenChecker = QFontChecker(self)
+        self.hyphenChecker.setObjectName("FontHyphenChecker")
+        self.hyphenChecker.setToolTip(
+            self.tr("Toggle Auto Hyphenation")
+        )
+        self.hyphenChecker.clicked.connect(
+            lambda: self.on_param_changed(
+                'auto_hyphenate',
+                self.hyphenChecker.isChecked(),
+            )
+        )
+
+        self.strokeWidthBox = SizeComboBox([0, 10], 'stroke_width', self)
+        self.strokeWidthBox.setObjectName("FontFormatSizeBox")
+        self.strokeWidthBox.addItems(["0.1"])
+        self.strokeWidthBox.setToolTip(self.tr("Change stroke width"))
+        self.strokeWidthBox.param_changed.connect(self.on_param_changed)
+
+        self.fontStrokeLabel = SizeControlLabel(self, 0, self.tr("Stroke"))
+        self.fontStrokeLabel.setObjectName("fontStrokeLabel")
+        self.fontStrokeLabel.size_ctrl_changed.connect(self.strokeWidthBox.changeByDelta)
+        self.fontStrokeLabel.btn_released.connect(lambda : self.on_param_changed('stroke_width', self.strokeWidthBox.value()))
+        
+        stroke_hlayout = QHBoxLayout()
+        stroke_hlayout.addWidget(self.fontStrokeLabel)
+        stroke_hlayout.addWidget(self.strokeWidthBox)
+        stroke_hlayout.setSpacing(7)
         self.letterSpacingBox = SizeComboBox([0, 10], "letter_spacing", self)
         self.letterSpacingBox.setObjectName("FontFormatSizeBox")
         self.letterSpacingBox.addItems(["0.0"])
@@ -858,6 +897,8 @@ class FontFormatPanel(Widget):
         vertical_layout.addWidget(self.verticalChecker)
         vertical_layout.addWidget(self.tateChuYokoChecker)
         vertical_layout.addWidget(self.romanAlignmentChecker)
+        vertical_layout.addWidget(self.shapeChecker)
+        vertical_layout.addWidget(self.hyphenChecker)
         vertical_layout.setSpacing(0)
         vertical_layout.setContentsMargins(0, 0, 0, 0)
         hl2.addLayout(vertical_layout)
@@ -1251,6 +1292,8 @@ class FontFormatPanel(Widget):
         self.romanAlignmentChecker.setChecked(
             font_format.standard_vertical_roman_alignment
         )
+        self.shapeChecker.setChecked(getattr(font_format, 'shape_type', 'rect') == 'ellipse')
+        self.hyphenChecker.setChecked(getattr(font_format, 'auto_hyphenate', False))
         self.alignBtnGroup.setAlignment(font_format.alignment)
         self.textadvancedfmt_panel.set_active_format(font_format)
         if update_effect_panel:

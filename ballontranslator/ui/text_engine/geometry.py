@@ -294,7 +294,10 @@ class TextItemGeometryController:
         if self.visual_mapper is not None:
             return self.visual_mapper.map_rect_path(self.logical_rect())
         path = QPainterPath()
-        path.addRect(self.logical_rect())
+        if getattr(self.item.fontformat, 'shape_type', 'rect') == 'ellipse':
+            path.addEllipse(self.logical_rect())
+        else:
+            path.addRect(self.logical_rect())
         return path
 
     def visual_outline_in_scene(self) -> QPainterPath:

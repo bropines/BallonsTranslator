@@ -281,6 +281,22 @@ class TextBlock:
     def alignment(self, value: int):
         self.fontformat.alignment = value
 
+    @property
+    def shape_type(self) -> str:
+        return self.fontformat.shape_type
+
+    @shape_type.setter
+    def shape_type(self, value: str) -> None:
+        self.fontformat.shape_type = value
+
+    @property
+    def auto_hyphenate(self) -> bool:
+        return self.fontformat.auto_hyphenate
+
+    @auto_hyphenate.setter
+    def auto_hyphenate(self, value: bool) -> None:
+        self.fontformat.auto_hyphenate = value
+
     def __post_init__(self) -> None:
         self.text_alpha_mask = load_text_alpha_mask(self.text_alpha_mask)
         if self.xyxy is not None:

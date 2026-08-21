@@ -1,3 +1,4 @@
+import math
 from typing import List, Optional, Tuple
 
 from qtpy.QtCore import QPointF, QRectF, QSizeF, Qt
@@ -957,7 +958,15 @@ class HorizontalTextDocumentLayout(SceneTextLayout):
                 )
             ):
                 shared_space_row = None
-                line.setLineWidth(self.available_width)
+                if getattr(self.fontformat, 'shape_type', 'rect') == 'ellipse' and self.available_height > 0 and self.available_width > 0:
+                    line_y_center = (y_offset - doc_margin) + (block_height / 2.0)
+                    norm_y = (2.0 * line_y_center - self.available_height) / max(1.0, self.available_height)
+                    norm_y = max(-0.95, min(0.95, norm_y))
+                    ratio = math.sqrt(max(0.0, 1.0 - norm_y * norm_y))
+                    ellipse_width = max(self.available_width * 0.25, self.available_width * ratio)
+                    line.setLineWidth(ellipse_width)
+                else:
+                    line.setLineWidth(self.available_width)
             protect_horizontal_ruby_wrap(block, line, ruby_metrics)
             self._settle_horizontal_ruby_wrap(block, line, ruby_metrics)
             nchar = line.textLength()
@@ -1006,7 +1015,11 @@ class HorizontalTextDocumentLayout(SceneTextLayout):
                 else y_offset
             )
             line_y_offset += over_margin
-            line.setPosition(QPointF(doc_margin, line_y_offset + dy))
+            if getattr(self.fontformat, 'shape_type', 'rect') == 'ellipse' and self.available_height > 0 and self.available_width > 0:
+                line_x_offset = doc_margin + max(0.0, (self.available_width - line.width()) / 2.0)
+                line.setPosition(QPointF(line_x_offset, line_y_offset + dy))
+            else:
+                line.setPosition(QPointF(doc_margin, line_y_offset + dy))
             relocated_start, relocated_spaces = self._trailing_space_layout(
                 block, line
             )

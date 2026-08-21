@@ -1517,6 +1517,22 @@ QFontChecker#FontRomanAlignmentChecker::indicator:checked {
     image: url(resources/icons/fontfmt_roman_alignment_activate.svg);
 }
 
+QFontChecker#FontShapeChecker::indicator {
+    image: url(resources/icons/fontfmt_ellipse.svg);
+}
+
+QFontChecker#FontShapeChecker::indicator:checked {
+    image: url(resources/icons/fontfmt_ellipse_activate.svg);
+}
+
+QFontChecker#FontHyphenChecker::indicator {
+    image: url(resources/icons/fontfmt_hyphen.svg);
+}
+
+QFontChecker#FontHyphenChecker::indicator:checked {
+    image: url(resources/icons/fontfmt_hyphen_activate.svg);
+}
+
 SizeControlLabel#fontStrokeLabel {
     font-size: 13px;
 }

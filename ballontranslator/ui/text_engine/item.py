@@ -28,6 +28,7 @@ from ballontranslator.utils.text_effects import (
     primary_stroke,
     with_primary_stroke,
 )
+from ballontranslator.utils.hyphenation import hyphenate_text, strip_soft_hyphens
 from ballontranslator.utils.imgproc_utils import xywh2xyxypoly
 from ballontranslator.utils.fontformat import (
     FontFormat,
@@ -506,6 +507,11 @@ class TextBlkItem(QGraphicsTextItem):
             cursor.setCharFormat(cfmt)
             cursor.setBlockCharFormat(cfmt)
             self.setTextCursor(cursor)
+        if font_fmt.auto_hyphenate:
+            self.apply_hyphenation(True)
+        if self.fontformat.gradient_enabled:
+            self.setGradientEnabled(True)
+        self.setShadow(font_fmt, repaint=False)
         self.setStrokeWidth(font_fmt.stroke_width, repaint_background=False)
         self.repaint_background()
 
@@ -1571,14 +1577,78 @@ class TextBlkItem(QGraphicsTextItem):
             if fallback_changed:
                 self.layout.reLayout()
         
+        # Preserve gradient properties
+        self.fontformat.gradient_enabled = ffmat.gradient_enabled
+        self.fontformat.gradient_start_color = ffmat.gradient_start_color
+        self.fontformat.gradient_end_color = ffmat.gradient_end_color
+        self.fontformat.gradient_angle = ffmat.gradient_angle
+        self.fontformat.gradient_size = ffmat.gradient_size
+        
+        shape_changed = getattr(self.fontformat, 'shape_type', 'rect') != getattr(ffmat, 'shape_type', 'rect')
+        hyphen_changed = getattr(self.fontformat, 'auto_hyphenate', False) != getattr(ffmat, 'auto_hyphenate', False)
         # Apply while the canonical model still contains the previous
         # transform; merging first would skip live geometry recompilation.
         self.set_text_transform(ffmat.text_transform)
         self.fontformat.merge(ffmat)
 
+        if shape_changed:
+            self.document().markContentsDirty(0, self.document().characterCount())
+            self.layout.reLayout()
+            self.visual_geometry_changed.emit()
+            self.update()
+            self.repaint_background()
+            scene = self.scene()
+            if scene is not None:
+                if hasattr(scene, 'txtblkShapeControl'):
+                    scene.txtblkShapeControl.updateBoundingRect()
+                scene.update()
+
+        if hyphen_changed:
+            self.apply_hyphenation(getattr(ffmat, 'auto_hyphenate', False))
+
         self.repainting = False
         if set_stroke_width:
             self.repaint_background()
+
+    def apply_hyphenation(self, enable: bool = True):
+        cursor = self.textCursor()
+        cursor.select(QTextCursor.SelectionType.Document)
+        text = cursor.selectedText()
+        if not text:
+            return
+        if enable:
+            new_text = hyphenate_text(text, lang='auto')
+        else:
+            new_text = strip_soft_hyphens(text)
+        if new_text != text:
+            cursor.insertText(new_text)
+            self.layout.reLayout()
+            self.visual_geometry_changed.emit()
+
+    def setShapeType(self, shape_type: str):
+        if getattr(self.fontformat, 'shape_type', 'rect') == shape_type:
+            return
+        self.fontformat.shape_type = shape_type
+        if self.blk is not None:
+            self.blk.fontformat.shape_type = shape_type
+        self.document().markContentsDirty(0, self.document().characterCount())
+        self.layout.reLayout()
+        self.visual_geometry_changed.emit()
+        self.update()
+        self.repaint_background()
+        scene = self.scene()
+        if scene is not None:
+            if hasattr(scene, 'txtblkShapeControl'):
+                scene.txtblkShapeControl.updateBoundingRect()
+            scene.update()
+
+    def setAutoHyphenate(self, auto_hyphenate: bool):
+        if getattr(self.fontformat, 'auto_hyphenate', False) == auto_hyphenate:
+            return
+        self.fontformat.auto_hyphenate = auto_hyphenate
+        if self.blk is not None:
+            self.blk.fontformat.auto_hyphenate = auto_hyphenate
+        self.apply_hyphenation(auto_hyphenate)
 
     def updateBlkFormat(self):
         fmt = self.get_fontformat()

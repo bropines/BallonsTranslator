@@ -1087,6 +1087,30 @@ function runBallonTranslatorBridge() {
                     else if (align === 2) tItem.justification = Justification.RIGHT;
                     else tItem.justification = Justification.CENTER;
 
+                    // Hyphenation & Language Dictionary
+                    try {
+                        if (fmt.auto_hyphenate !== undefined) {
+                            tItem.hyphenation = fmt.auto_hyphenate ? true : false;
+                        } else {
+                            tItem.hyphenation = true;
+                        }
+                    } catch (hyphenE) {}
+
+                    try {
+                        var targetLang = projectData.target_lang || projectData.language || (blk.language || "ru");
+                        if (targetLang === "ru" || targetLang === "rus") {
+                            tItem.language = Language.RUSSIAN;
+                        } else if (targetLang === "en" || targetLang === "eng") {
+                            tItem.language = Language.ENGLISHUSA;
+                        } else if (targetLang === "es" || targetLang === "spa") {
+                            tItem.language = Language.SPANISH;
+                        } else if (targetLang === "fr" || targetLang === "fre") {
+                            tItem.language = Language.FRENCH;
+                        } else if (targetLang === "de" || targetLang === "ger") {
+                            tItem.language = Language.GERMAN;
+                        }
+                    } catch (langE) {}
+
                     // Fill Color
                     var frgb = fmt.frgb || [0, 0, 0];
                     var fColor = new SolidColor();

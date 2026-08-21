@@ -1,3 +1,4 @@
+import math
 import re
 import unicodedata
 from bisect import bisect_right
@@ -2060,7 +2061,14 @@ class VerticalTextDocumentLayout(SceneTextLayout):
                     ):
                         inseparable_run_range = (run_start, run_end)
 
-            available_height = self.available_height + doc_margin
+            if getattr(self.fontformat, 'shape_type', 'rect') == 'ellipse' and self.available_width > 0 and self.available_height > 0:
+                col_x_center = (x_offset - doc_margin) + (col_width / 2.0)
+                norm_x = (2.0 * col_x_center - self.available_width) / max(1.0, self.available_width)
+                norm_x = max(-0.95, min(0.95, norm_x))
+                ratio = math.sqrt(max(0.0, 1.0 - norm_x * norm_x))
+                available_height = max(self.available_height * 0.25, self.available_height * ratio) + doc_margin
+            else:
+                available_height = self.available_height + doc_margin
             text_len = line.textLength()
             end_char = char_idx + text_len >= blk_text_len
             if active_ruby_metric is None:

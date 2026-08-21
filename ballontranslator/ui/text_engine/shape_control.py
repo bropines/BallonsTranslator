@@ -26,6 +26,7 @@ from ..cursor import (
     rotateCursorList,
     scene_angle_to_cursor_index,
 )
+from ballontranslator.utils import config as C
 from .item import TextBlkItem
 from .transforms.mapping import rect_polygon
 
@@ -954,7 +955,15 @@ class TextBlkShapeControl(QGraphicsRectItem):
         path = self._visual_path
         painter.setPen(self.pen())
         if path.isEmpty():
-            painter.drawRect(self.rect())
+            is_ellipse = False
+            if self.blk_item is not None:
+                is_ellipse = getattr(self.blk_item.fontformat, 'shape_type', 'rect') == 'ellipse'
+            elif getattr(C, 'active_format', None) is not None:
+                is_ellipse = getattr(C.active_format, 'shape_type', 'rect') == 'ellipse'
+            if is_ellipse:
+                painter.drawEllipse(self.rect())
+            else:
+                painter.drawRect(self.rect())
         else:
             painter.drawPath(path)
         painter.restore()

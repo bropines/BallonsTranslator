@@ -733,6 +733,8 @@ class FontFormat(Config):
     gradient_size: float = 1.0
     _style_name: str = ''
     line_spacing_type: int = LineSpacingType.Proportional
+    shape_type: str = 'rect'
+    auto_hyphenate: bool = False
 
     # Runtime owns one value; persistence keeps its existing list and flat
     # Glyph Slant fields for project/config compatibility.
@@ -859,6 +861,20 @@ class FontFormat(Config):
                     getattr(self, name),
                 )
                 setattr(self, name, 'default')
+
+        if self.shape_type not in {'rect', 'ellipse'}:
+            LOGGER.warning(
+                'Ignoring invalid shape type (%r); using "rect".',
+                self.shape_type,
+            )
+            self.shape_type = 'rect'
+
+        if not isinstance(self.auto_hyphenate, bool):
+            LOGGER.warning(
+                'Ignoring invalid auto_hyphenate value (%r); using False.',
+                self.auto_hyphenate,
+            )
+            self.auto_hyphenate = False
 
         self.font_weight = coerce_font_weight(self.font_weight)
         if not isinstance(self.text_transform, TextTransformStack):
