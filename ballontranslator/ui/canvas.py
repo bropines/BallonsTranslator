@@ -92,6 +92,14 @@ class CustomGV(QGraphicsView):
 
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        self.setMouseTracking(True)
+        self.viewport().setMouseTracking(True)
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        super().mouseMoveEvent(event)
+        if self.canvas is not None and not event.buttons():
+            scene_pos = self.mapToScene(event.pos())
+            self.canvas._check_polygon_hover(scene_pos, event.modifiers())
 
     def wheelEvent(self, event : QWheelEvent) -> None:
         # qgraphicsview always scroll content according to wheelevent
@@ -111,14 +119,11 @@ class CustomGV(QGraphicsView):
         elif event.key() == Qt.Key.Key_Shift:
             if self.canvas is not None:
                 self.canvas._update_creation_cursor(False)
-        elif event.key() == Qt.Key.Key_Alt:
-            if self.canvas is not None:
-                if getattr(self.canvas, '_alt_hover_active', False):
-                    self.canvas._alt_hover_active = False
-                    self.viewport().unsetCursor()
-                if self.canvas.txtblkShapeControl and getattr(self.canvas.txtblkShapeControl, '_hover_edge_pos', None) is not None:
-                    self.canvas.txtblkShapeControl._hover_edge_pos = None
-                    self.canvas.txtblkShapeControl.update()
+        
+        if self.canvas is not None:
+            scene_pos = self.mapToScene(self.mapFromGlobal(QCursor.pos()))
+            self.canvas._check_polygon_hover(scene_pos, event.modifiers())
+
         return super().keyReleaseEvent(event)
 
     def keyPressEvent(self, e: QKeyEvent) -> None:
@@ -128,6 +133,10 @@ class CustomGV(QGraphicsView):
         elif key == Qt.Key.Key_Shift:
             if self.canvas is not None:
                 self.canvas._update_creation_cursor(True)
+
+        if self.canvas is not None:
+            scene_pos = self.mapToScene(self.mapFromGlobal(QCursor.pos()))
+            self.canvas._check_polygon_hover(scene_pos, e.modifiers())
 
         if self.canvas is not None and self.canvas.path_reorder_active:
             return super().keyPressEvent(e)
@@ -1018,6 +1027,34 @@ class Canvas(QGraphicsScene):
                     return item, 'edge', i, proj_scene, norm_proj
 
         return None, None, -1, None, None
+
+    def _check_polygon_hover(self, scene_pos: QPointF, modifiers: Qt.KeyboardModifiers) -> None:
+        if not self.textEditMode():
+            return
+        is_vertex_mode = bool(
+            (modifiers & (Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier))
+            or (self.creation_tool_mode == 'polygon_pen')
+        )
+        if is_vertex_mode:
+            item, hit_type, hit_idx, hit_pt, norm_pt = self._find_polygon_vertex_or_edge_at(scene_pos, tolerance_px=22.0)
+            if item is not None:
+                cursor = Qt.CursorShape.PointingHandCursor if hit_type == 'vertex' else Qt.CursorShape.CrossCursor
+                self.gv.viewport().setCursor(cursor)
+                if self.txtblkShapeControl:
+                    self.txtblkShapeControl.setCursor(cursor)
+                    self.txtblkShapeControl._hover_edge_pos = hit_pt
+                    self.txtblkShapeControl.update()
+                self._alt_hover_active = True
+                return
+
+        if getattr(self, '_alt_hover_active', False):
+            self._alt_hover_active = False
+            self.gv.viewport().unsetCursor()
+            if self.txtblkShapeControl:
+                self.txtblkShapeControl.setCursor(Qt.CursorShape.SizeAllCursor)
+                if getattr(self.txtblkShapeControl, '_hover_edge_pos', None) is not None:
+                    self.txtblkShapeControl._hover_edge_pos = None
+                    self.txtblkShapeControl.update()
 
     @property
     def path_reorder_active(self) -> bool:
