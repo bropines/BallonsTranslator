@@ -1028,9 +1028,11 @@ class Canvas(QGraphicsScene):
 
         return None, None, -1, None, None
 
-    def _check_polygon_hover(self, scene_pos: QPointF, modifiers: Qt.KeyboardModifiers) -> None:
+    def _check_polygon_hover(self, scene_pos: QPointF, modifiers=None) -> None:
         if not self.textEditMode():
             return
+        if modifiers is None:
+            modifiers = QApplication.keyboardModifiers()
         is_alt = bool(modifiers & (Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.MetaModifier))
         if is_alt:
             item, hit_type, hit_idx, hit_pt, norm_pt = self._find_polygon_vertex_or_edge_at(scene_pos, tolerance_px=22.0)
