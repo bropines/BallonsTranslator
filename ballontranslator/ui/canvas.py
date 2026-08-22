@@ -970,7 +970,7 @@ class Canvas(QGraphicsScene):
             if shape != 'polygon' or not poly_pts or len(poly_pts) < 3:
                 continue
 
-            lr = item.logical_rect()
+            lr = item.rect()
             w, h = max(1.0, lr.width()), max(1.0, lr.height())
             local_pos = item.mapFromScene(scene_pos)
             
@@ -1209,7 +1209,7 @@ class Canvas(QGraphicsScene):
         if getattr(self, '_polygon_drag_item', None) is not None:
             item = self._polygon_drag_item
             idx = self._polygon_drag_vertex_idx
-            lr = item.logical_rect()
+            lr = item.rect()
             w, h = max(1.0, lr.width()), max(1.0, lr.height())
             local_pos = item.mapFromScene(event.scenePos())
             new_norm_x = local_pos.x() / w

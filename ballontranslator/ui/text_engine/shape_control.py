@@ -972,7 +972,7 @@ class TextBlkShapeControl(QGraphicsRectItem):
             if self.blk_item is not None and getattr(self.blk_item.fontformat, 'shape_type', 'rect') == 'polygon':
                 poly_pts = getattr(self.blk_item.fontformat, 'polygon_points', None)
                 if poly_pts and len(poly_pts) >= 3:
-                    lr = self.blk_item.logical_rect()
+                    lr = self.blk_item.rect()
                     w, h = max(1.0, lr.width()), max(1.0, lr.height())
                     painter.setBrush(QBrush(QColor(240, 50, 130)))
                     painter.setPen(QPen(QColor(255, 255, 255), 1.5))
