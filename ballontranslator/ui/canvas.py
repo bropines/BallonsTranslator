@@ -1031,11 +1031,8 @@ class Canvas(QGraphicsScene):
     def _check_polygon_hover(self, scene_pos: QPointF, modifiers: Qt.KeyboardModifiers) -> None:
         if not self.textEditMode():
             return
-        is_vertex_mode = bool(
-            (modifiers & (Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier))
-            or (self.creation_tool_mode == 'polygon_pen')
-        )
-        if is_vertex_mode:
+        is_alt = bool(modifiers & (Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.MetaModifier))
+        if is_alt:
             item, hit_type, hit_idx, hit_pt, norm_pt = self._find_polygon_vertex_or_edge_at(scene_pos, tolerance_px=22.0)
             if item is not None:
                 cursor = Qt.CursorShape.PointingHandCursor if hit_type == 'vertex' else Qt.CursorShape.CrossCursor
@@ -1303,11 +1300,8 @@ class Canvas(QGraphicsScene):
             self.scale_tool.emit(event.scenePos())
 
         modifiers = event.modifiers() or QApplication.keyboardModifiers()
-        is_vertex_mode = bool(
-            (modifiers & (Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier))
-            or (self.creation_tool_mode == 'polygon_pen')
-        )
-        if is_vertex_mode and self.textEditMode():
+        is_alt = bool(modifiers & (Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.MetaModifier))
+        if is_alt and self.textEditMode():
             item, hit_type, hit_idx, hit_pt, norm_pt = self._find_polygon_vertex_or_edge_at(event.scenePos(), tolerance_px=20.0)
             if item is not None:
                 if hit_type == 'vertex':
@@ -1445,11 +1439,8 @@ class Canvas(QGraphicsScene):
         if self.imgtrans_proj.img_valid:
             if self.textEditMode():
                 modifiers = event.modifiers() or QApplication.keyboardModifiers()
-                is_vertex_mode = bool(
-                    (modifiers & (Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier))
-                    or (self.creation_tool_mode == 'polygon_pen')
-                )
-                if is_vertex_mode:
+                is_alt = bool(modifiers & (Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.MetaModifier))
+                if is_alt:
                     item, hit_type, hit_idx, hit_pt, norm_pt = self._find_polygon_vertex_or_edge_at(event.scenePos(), tolerance_px=20.0)
                     if item is not None:
                         if btn == Qt.MouseButton.LeftButton:
