@@ -969,8 +969,8 @@ class Canvas(QGraphicsScene):
         self.end_create_polygon_textblock.emit(rect, norm_pts)
         return True
 
-    def _find_polygon_vertex_or_edge_at(self, scene_pos: QPointF, tolerance_px: float = 18.0):
-        """Finds if scene_pos is near a vertex or edge of any polygon text item."""
+    def _find_polygon_vertex_or_edge_at(self, scene_pos: QPointF, tolerance_px: float = 20.0):
+        """Finds if scene_pos is near a vertex or edge of any polygon text item in scene coordinates."""
         candidates = list(self.selected_text_items())
         for itm in self.items(scene_pos):
             if isinstance(itm, TextBlkItem) and itm not in candidates:
@@ -978,6 +978,10 @@ class Canvas(QGraphicsScene):
         if self.txtblkShapeControl and self.txtblkShapeControl.blk_item is not None:
             if self.txtblkShapeControl.blk_item not in candidates:
                 candidates.append(self.txtblkShapeControl.blk_item)
+        if hasattr(self, 'textLayer') and self.textLayer is not None:
+            for itm in self.textLayer.childItems():
+                if isinstance(itm, TextBlkItem) and itm not in candidates:
+                    candidates.append(itm)
 
         for item in candidates:
             shape = getattr(item.fontformat, 'shape_type', 'rect')
@@ -987,31 +991,31 @@ class Canvas(QGraphicsScene):
 
             lr = item.rect()
             w, h = max(1.0, lr.width()), max(1.0, lr.height())
-            local_pos = item.mapFromScene(scene_pos)
             
-            # 1. Check vertices first
+            # 1. Check vertices in SCENE coordinates
             for idx, p in enumerate(poly_pts):
-                v_pos = QPointF(p[0] * w, p[1] * h)
-                dist = (local_pos - v_pos).manhattanLength()
+                v_scene = item.mapToScene(QPointF(p[0] * w, p[1] * h))
+                dist = (scene_pos - v_scene).manhattanLength()
                 if dist <= tolerance_px:
-                    return item, 'vertex', idx, v_pos, [p[0], p[1]]
+                    return item, 'vertex', idx, v_scene, [p[0], p[1]]
 
-            # 2. Check edges
+            # 2. Check edges in SCENE coordinates
             n = len(poly_pts)
             for i in range(n):
-                p1 = QPointF(poly_pts[i][0] * w, poly_pts[i][1] * h)
-                p2 = QPointF(poly_pts[(i + 1) % n][0] * w, poly_pts[(i + 1) % n][1] * h)
-                edge_vec = p2 - p1
+                p1_scene = item.mapToScene(QPointF(poly_pts[i][0] * w, poly_pts[i][1] * h))
+                p2_scene = item.mapToScene(QPointF(poly_pts[(i + 1) % n][0] * w, poly_pts[(i + 1) % n][1] * h))
+                edge_vec = p2_scene - p1_scene
                 edge_len_sq = edge_vec.x() ** 2 + edge_vec.y() ** 2
                 if edge_len_sq < 1e-6:
                     continue
-                pt_vec = local_pos - p1
+                pt_vec = scene_pos - p1_scene
                 t = max(0.0, min(1.0, (pt_vec.x() * edge_vec.x() + pt_vec.y() * edge_vec.y()) / edge_len_sq))
-                proj = p1 + edge_vec * t
-                dist = (local_pos - proj).manhattanLength()
+                proj_scene = p1_scene + edge_vec * t
+                dist = (scene_pos - proj_scene).manhattanLength()
                 if dist <= tolerance_px:
-                    norm_proj = [proj.x() / w, proj.y() / h]
-                    return item, 'edge', i, proj, norm_proj
+                    proj_local = item.mapFromScene(proj_scene)
+                    norm_proj = [proj_local.x() / w, proj_local.y() / h]
+                    return item, 'edge', i, proj_scene, norm_proj
 
         return None, None, -1, None, None
 
@@ -1262,9 +1266,12 @@ class Canvas(QGraphicsScene):
             self.scale_tool.emit(event.scenePos())
 
         modifiers = event.modifiers() or QApplication.keyboardModifiers()
-        is_alt = bool(modifiers & Qt.KeyboardModifier.AltModifier)
-        if is_alt and self.textEditMode():
-            item, hit_type, hit_idx, hit_pt, norm_pt = self._find_polygon_vertex_or_edge_at(event.scenePos(), tolerance_px=18.0)
+        is_vertex_mode = bool(
+            (modifiers & (Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier))
+            or (self.creation_tool_mode == 'polygon_pen')
+        )
+        if is_vertex_mode and self.textEditMode():
+            item, hit_type, hit_idx, hit_pt, norm_pt = self._find_polygon_vertex_or_edge_at(event.scenePos(), tolerance_px=20.0)
             if item is not None:
                 if hit_type == 'vertex':
                     self.gv.viewport().setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1401,9 +1408,12 @@ class Canvas(QGraphicsScene):
         if self.imgtrans_proj.img_valid:
             if self.textEditMode():
                 modifiers = event.modifiers() or QApplication.keyboardModifiers()
-                is_alt = bool(modifiers & Qt.KeyboardModifier.AltModifier)
-                if is_alt:
-                    item, hit_type, hit_idx, hit_pt, norm_pt = self._find_polygon_vertex_or_edge_at(event.scenePos())
+                is_vertex_mode = bool(
+                    (modifiers & (Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier))
+                    or (self.creation_tool_mode == 'polygon_pen')
+                )
+                if is_vertex_mode:
+                    item, hit_type, hit_idx, hit_pt, norm_pt = self._find_polygon_vertex_or_edge_at(event.scenePos(), tolerance_px=20.0)
                     if item is not None:
                         if btn == Qt.MouseButton.LeftButton:
                             pts = [list(p) for p in item.fontformat.polygon_points]

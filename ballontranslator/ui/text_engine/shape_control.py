@@ -977,11 +977,14 @@ class TextBlkShapeControl(QGraphicsRectItem):
                     painter.setBrush(QBrush(QColor(240, 50, 130)))
                     painter.setPen(QPen(QColor(255, 255, 255), 1.5))
                     for p in poly_pts:
-                        painter.drawEllipse(QPointF(p[0] * w, p[1] * h), 4.0, 4.0)
+                        item_pt = QPointF(p[0] * w, p[1] * h)
+                        ctrl_pt = self.mapFromItem(self.blk_item, item_pt)
+                        painter.drawEllipse(ctrl_pt, 4.0, 4.0)
                 if getattr(self, '_hover_edge_pos', None) is not None:
+                    ctrl_hover = self.mapFromScene(self._hover_edge_pos)
                     painter.setBrush(QBrush(QColor(0, 220, 255)))
                     painter.setPen(QPen(QColor(255, 255, 255), 2.0))
-                    painter.drawEllipse(self._hover_edge_pos, 5.0, 5.0)
+                    painter.drawEllipse(ctrl_hover, 5.0, 5.0)
         painter.restore()
 
     def hideControls(self):
