@@ -956,7 +956,10 @@ class TextBlkShapeControl(QGraphicsRectItem):
         painter.setPen(self.pen())
         if path.isEmpty():
             is_ellipse = False
-            if self.blk_item is not None:
+            scene = self.scene()
+            if scene is not None and getattr(scene, 'creation_tool_mode', 'rect') == 'ellipse':
+                is_ellipse = True
+            elif self.blk_item is not None:
                 is_ellipse = getattr(self.blk_item.fontformat, 'shape_type', 'rect') == 'ellipse'
             elif getattr(C, 'active_format', None) is not None:
                 is_ellipse = getattr(C.active_format, 'shape_type', 'rect') == 'ellipse'

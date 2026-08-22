@@ -756,18 +756,6 @@ class FontFormatPanel(Widget):
             )
         )
 
-        self.shapeChecker = QFontChecker(self)
-        self.shapeChecker.setObjectName("FontShapeChecker")
-        self.shapeChecker.setToolTip(
-            self.tr("Toggle Elliptical / Rectangular Balloon Shape")
-        )
-        self.shapeChecker.clicked.connect(
-            lambda: self.on_param_changed(
-                'shape_type',
-                'ellipse' if self.shapeChecker.isChecked() else 'rect',
-            )
-        )
-
         self.hyphenChecker = QFontChecker(self)
         self.hyphenChecker.setObjectName("FontHyphenChecker")
         self.hyphenChecker.setToolTip(
@@ -897,7 +885,6 @@ class FontFormatPanel(Widget):
         vertical_layout.addWidget(self.verticalChecker)
         vertical_layout.addWidget(self.tateChuYokoChecker)
         vertical_layout.addWidget(self.romanAlignmentChecker)
-        vertical_layout.addWidget(self.shapeChecker)
         vertical_layout.addWidget(self.hyphenChecker)
         vertical_layout.setSpacing(0)
         vertical_layout.setContentsMargins(0, 0, 0, 0)
@@ -1292,7 +1279,6 @@ class FontFormatPanel(Widget):
         self.romanAlignmentChecker.setChecked(
             font_format.standard_vertical_roman_alignment
         )
-        self.shapeChecker.setChecked(getattr(font_format, 'shape_type', 'rect') == 'ellipse')
         self.hyphenChecker.setChecked(getattr(font_format, 'auto_hyphenate', False))
         self.alignBtnGroup.setAlignment(font_format.alignment)
         self.textadvancedfmt_panel.set_active_format(font_format)

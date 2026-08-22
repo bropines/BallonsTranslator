@@ -1,10 +1,11 @@
+import cv2
 import numpy as np
 from typing import Callable, List, Optional, Union
 import os
 
 from qtpy.QtWidgets import QApplication, QSlider, QMenu, QGraphicsScene, QGraphicsSceneDragDropEvent , QGraphicsView, QGraphicsSceneDragDropEvent, QGraphicsRectItem, QGraphicsItem, QScrollBar, QGraphicsPixmapItem, QGraphicsSceneMouseEvent, QGraphicsSceneContextMenuEvent, QRubberBand
 from qtpy.QtCore import Qt, QDateTime, QRectF, QPointF, QPoint, Signal, QSize, QSizeF, QEvent, QTimer
-from qtpy.QtGui import QKeySequence, QPixmap, QImage, QHideEvent, QKeyEvent, QWheelEvent, QResizeEvent, QPainter, QPen, QPainterPath, QCursor, QNativeGestureEvent
+from qtpy.QtGui import QKeySequence, QPixmap, QImage, QHideEvent, QKeyEvent, QWheelEvent, QResizeEvent, QPainter, QPen, QBrush, QPainterPath, QCursor, QNativeGestureEvent
 from qtpy.QtWidgets import QGraphicsPathItem
 from qtpy.QtCore import QLineF
 from qtpy.QtGui import QColor, QPainterPathStroker
@@ -107,12 +108,18 @@ class CustomGV(QGraphicsView):
         if event.key() == QKEY.Key_Control:
             self.ctrl_pressed = False
             self.ctrl_released.emit()
+        elif event.key() == Qt.Key.Key_Shift:
+            if self.canvas is not None:
+                self.canvas._update_creation_cursor(False)
         return super().keyReleaseEvent(event)
 
     def keyPressEvent(self, e: QKeyEvent) -> None:
         key = e.key()
         if key == QKEY.Key_Control:
             self.ctrl_pressed = True
+        elif key == Qt.Key.Key_Shift:
+            if self.canvas is not None:
+                self.canvas._update_creation_cursor(True)
 
         if self.canvas is not None and self.canvas.path_reorder_active:
             return super().keyPressEvent(e)
@@ -172,6 +179,7 @@ class Canvas(QGraphicsScene):
 
     scalefactor_changed = Signal()
     end_create_textblock = Signal(QRectF)
+    end_create_polygon_textblock = Signal(QRectF, list)
     paste2selected_textitems = Signal()
     end_create_rect = Signal(QRectF, int)
     finish_painting = Signal(StrokeImgItem)
@@ -309,6 +317,23 @@ class Canvas(QGraphicsScene):
         self.txtblkShapeControl.setParentItem(self.baseLayer)
         self.txtblkGridControl.setParentItem(self.baseLayer)
         self.txtblkProjectiveControl.setParentItem(self.baseLayer)
+
+        self.polygon_preview_item = QGraphicsPathItem()
+        preview_pen = QPen(QColor(30, 147, 229, 230), 2.0, Qt.PenStyle.DashLine)
+        preview_pen.setCosmetic(True)
+        self.polygon_preview_item.setPen(preview_pen)
+        self.polygon_preview_item.setBrush(QBrush(QColor(30, 147, 229, 45)))
+        self.polygon_preview_item.setZValue(105.0)
+        self.polygon_preview_item.hide()
+        self.addItem(self.polygon_preview_item)
+        self.polygon_preview_item.setParentItem(self.baseLayer)
+
+        self.creation_tool_mode = 'rect'  # 'rect', 'ellipse', 'polygon_pen', 'freehand_lasso'
+        self._polygon_pen_active = False
+        self._polygon_pen_points: List[QPointF] = []
+        self._freehand_active = False
+        self._freehand_points: List[QPointF] = []
+
         self._text_shape_refresh_timer = QTimer(self.gv)
         self._text_shape_refresh_timer.setSingleShot(True)
         self._text_shape_refresh_timer.timeout.connect(
@@ -849,6 +874,93 @@ class Canvas(QGraphicsScene):
                 textblk_created = True
         return textblk_created
 
+    def _get_tool_cursor(self, tool_mode: str) -> QCursor:
+        if tool_mode == 'polygon_pen':
+            pix = QPixmap('resources/icons/tool_polygon_pen.svg').scaled(24, 24, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            return QCursor(pix, 3, 21)
+        elif tool_mode == 'freehand_lasso':
+            pix = QPixmap('resources/icons/tool_freehand.svg').scaled(24, 24, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            return QCursor(pix, 3, 21)
+        return QCursor(Qt.CursorShape.CrossCursor)
+
+    def _update_creation_cursor(self, shift_pressed: Optional[bool] = None) -> None:
+        if not hasattr(self, 'gv') or self.gv is None:
+            return
+        if not self.textEditMode():
+            if getattr(self, '_custom_tool_cursor_active', False):
+                self._custom_tool_cursor_active = False
+                self.gv.viewport().unsetCursor()
+            return
+        if shift_pressed is None:
+            modifiers = QApplication.keyboardModifiers()
+            shift_pressed = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
+        
+        is_drawing = self._polygon_pen_active or self._freehand_active
+        if self.creation_tool_mode in ('polygon_pen', 'freehand_lasso'):
+            if shift_pressed or is_drawing:
+                cursor = self._get_tool_cursor(self.creation_tool_mode)
+                self.gv.viewport().setCursor(cursor)
+                self._custom_tool_cursor_active = True
+                return
+        if getattr(self, '_custom_tool_cursor_active', False):
+            self._custom_tool_cursor_active = False
+            self.gv.viewport().unsetCursor()
+
+    def cancel_polygon_creation(self) -> None:
+        self._polygon_pen_active = False
+        self._polygon_pen_points.clear()
+        self._freehand_active = False
+        self._freehand_points.clear()
+        if hasattr(self, 'polygon_preview_item'):
+            self.polygon_preview_item.hide()
+            self.polygon_preview_item.setPath(QPainterPath())
+        self._update_creation_cursor(False)
+
+    def _update_polygon_pen_preview(self, hover_pos: Optional[QPointF] = None) -> None:
+        if not self._polygon_pen_points:
+            return
+        path = QPainterPath(self._polygon_pen_points[0])
+        for pt in self._polygon_pen_points[1:]:
+            path.lineTo(pt)
+        if hover_pos is not None:
+            path.lineTo(hover_pos)
+        self.polygon_preview_item.setPath(path)
+        self.polygon_preview_item.show()
+
+    def _finish_polygon_pen(self) -> bool:
+        if len(self._polygon_pen_points) < 3:
+            self.cancel_polygon_creation()
+            return False
+        xs = [p.x() for p in self._polygon_pen_points]
+        ys = [p.y() for p in self._polygon_pen_points]
+        min_x, min_y, max_x, max_y = min(xs), min(ys), max(xs), max(ys)
+        w, h = max(10.0, max_x - min_x), max(10.0, max_y - min_y)
+        rel_pts = [[float(p.x() - min_x), float(p.y() - min_y)] for p in self._polygon_pen_points]
+        rect = QRectF(min_x, min_y, w, h)
+        self.cancel_polygon_creation()
+        self.end_create_polygon_textblock.emit(rect, rel_pts)
+        return True
+
+    def _finish_freehand_lasso(self) -> bool:
+        if len(self._freehand_points) < 5:
+            self.cancel_polygon_creation()
+            return False
+        pts_arr = np.array([[p.x(), p.y()] for p in self._freehand_points], dtype=np.float32)
+        approx = cv2.approxPolyDP(pts_arr, epsilon=2.5, closed=True)
+        if len(approx) < 3:
+            self.cancel_polygon_creation()
+            return False
+        simplified = [QPointF(float(pt[0][0]), float(pt[0][1])) for pt in approx]
+        xs = [p.x() for p in simplified]
+        ys = [p.y() for p in simplified]
+        min_x, min_y, max_x, max_y = min(xs), min(ys), max(xs), max(ys)
+        w, h = max(10.0, max_x - min_x), max(10.0, max_y - min_y)
+        rel_pts = [[float(p.x() - min_x), float(p.y() - min_y)] for p in simplified]
+        rect = QRectF(min_x, min_y, w, h)
+        self.cancel_polygon_creation()
+        self.end_create_polygon_textblock.emit(rect, rel_pts)
+        return True
+
     @property
     def path_reorder_active(self) -> bool:
         return self._path_reorder_active
@@ -1020,6 +1132,22 @@ class Canvas(QGraphicsScene):
 
     def mouseMoveEvent(self, event: QGraphicsSceneMouseEvent) -> None:
         if self.alpha_mask_edit_session.handle_mouse_move(event):
+            return
+        if self._polygon_pen_active:
+            pos = event.scenePos() / self.scale_factor
+            self._update_polygon_pen_preview(hover_pos=pos)
+            event.accept()
+            return
+        if self._freehand_active:
+            pos = event.scenePos() / self.scale_factor
+            if self._freehand_points:
+                last = self._freehand_points[-1]
+                if (pos - last).manhattanLength() >= 2.0:
+                    self._freehand_points.append(pos)
+                    path = QPainterPath(self._freehand_points[0])
+                    for pt in self._freehand_points[1:]:
+                        path.lineTo(pt)
+                    self.polygon_preview_item.setPath(path)
             event.accept()
             return
         if self._path_reorder_drawing:
@@ -1060,6 +1188,8 @@ class Canvas(QGraphicsScene):
         if self._text_creation_cursor_active:
             # Creation is a modal drag, so it overrides child text cursors.
             self.gv.viewport().setCursor(Qt.CursorShape.CrossCursor)
+        else:
+            self._update_creation_cursor()
         return result
     
     @property
@@ -1162,6 +1292,52 @@ class Canvas(QGraphicsScene):
             return
         
         if self.imgtrans_proj.img_valid:
+            if self.textEditMode():
+                items_at = self.items(event.scenePos())
+                has_text_item = any(
+                    isinstance(item, TextBlkItem) or item.data(CONTROL_ITEM_DATA_KEY)
+                    for item in items_at
+                )
+                modifiers = event.modifiers() or QApplication.keyboardModifiers()
+                is_shift = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
+
+                if self.creation_tool_mode == 'polygon_pen':
+                    if (is_shift or self._polygon_pen_active) and (not has_text_item or self._polygon_pen_active):
+                        if btn == Qt.MouseButton.LeftButton:
+                            pos = event.scenePos() / self.scale_factor
+                            self._polygon_pen_active = True
+                            self._polygon_pen_points.append(pos)
+                            self._update_polygon_pen_preview()
+                            event.accept()
+                            return
+                        elif btn == Qt.MouseButton.RightButton:
+                            if self._polygon_pen_active and len(self._polygon_pen_points) >= 3:
+                                self._finish_polygon_pen()
+                                event.accept()
+                                return
+                            elif self._polygon_pen_active:
+                                self.cancel_polygon_creation()
+                                event.accept()
+                                return
+                    elif btn == Qt.MouseButton.RightButton and self._polygon_pen_active:
+                        if len(self._polygon_pen_points) >= 3:
+                            self._finish_polygon_pen()
+                        else:
+                            self.cancel_polygon_creation()
+                        event.accept()
+                        return
+
+                elif self.creation_tool_mode == 'freehand_lasso':
+                    if is_shift and not has_text_item and btn == Qt.MouseButton.LeftButton:
+                        pos = event.scenePos() / self.scale_factor
+                        self._freehand_active = True
+                        self._freehand_points = [pos]
+                        path = QPainterPath(pos)
+                        self.polygon_preview_item.setPath(path)
+                        self.polygon_preview_item.show()
+                        event.accept()
+                        return
+
             if self.textblock_mode and len(self.selectedItems()) == 0 and self.textEditMode():
                 if btn == Qt.MouseButton.RightButton:
                     return self.startCreateTextblock(event.scenePos())
@@ -1210,6 +1386,9 @@ class Canvas(QGraphicsScene):
     def mouseReleaseEvent(self, event: QGraphicsSceneMouseEvent) -> None:
         btn = event.button()
         if self.alpha_mask_edit_session.handle_mouse_release(event):
+            return
+        if self._freehand_active and btn == Qt.MouseButton.LeftButton:
+            self._finish_freehand_lasso()
             event.accept()
             return
         if self._path_reorder_drawing and btn == Qt.MouseButton.LeftButton:
@@ -1248,9 +1427,26 @@ class Canvas(QGraphicsScene):
         return super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event: QGraphicsSceneMouseEvent) -> None:
+        if self._polygon_pen_active and len(self._polygon_pen_points) >= 3:
+            self._finish_polygon_pen()
+            event.accept()
+            return
         if self._rubber_band_target == 'grid':
             self.hide_rubber_band()
         return super().mouseDoubleClickEvent(event)
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        if event.key() == Qt.Key.Key_Escape:
+            if self._polygon_pen_active or self._freehand_active:
+                self.cancel_polygon_creation()
+                event.accept()
+                return
+        elif event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            if self._polygon_pen_active and len(self._polygon_pen_points) >= 3:
+                self._finish_polygon_pen()
+                event.accept()
+                return
+        return super().keyPressEvent(event)
 
     def _is_grid_rubber_origin(
         self,

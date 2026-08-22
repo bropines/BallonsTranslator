@@ -1473,6 +1473,7 @@ class MainWindow(mainwindow_cls):
     def setTextBlockMode(self):
         mode = self.bottomBar.textblockChecker.isChecked()
         self.canvas.setTextBlockMode(mode)
+        self.bottomBar.set_creation_tools_visible(mode)
         pcfg.imgtrans_textblock = mode
         self.st_manager.showTextblkItemRect(mode)
 

@@ -294,7 +294,25 @@ class TextItemGeometryController:
         if self.visual_mapper is not None:
             return self.visual_mapper.map_rect_path(self.logical_rect())
         path = QPainterPath()
-        if getattr(self.item.fontformat, 'shape_type', 'rect') == 'ellipse':
+        shape = getattr(self.item.fontformat, 'shape_type', 'rect')
+        poly_pts = getattr(self.item.fontformat, 'polygon_points', None)
+        if shape == 'polygon' and poly_pts and len(poly_pts) >= 3:
+            lr = self.logical_rect()
+            w, h = max(1.0, lr.width()), max(1.0, lr.height())
+            is_norm = all(0.0 <= p[0] <= 1.05 and 0.0 <= p[1] <= 1.05 for p in poly_pts)
+            p0 = QPointF(
+                poly_pts[0][0] * w if is_norm else poly_pts[0][0],
+                poly_pts[0][1] * h if is_norm else poly_pts[0][1],
+            )
+            path.moveTo(p0)
+            for pt in poly_pts[1:]:
+                p_next = QPointF(
+                    pt[0] * w if is_norm else pt[0],
+                    pt[1] * h if is_norm else pt[1],
+                )
+                path.lineTo(p_next)
+            path.closeSubpath()
+        elif shape == 'ellipse':
             path.addEllipse(self.logical_rect())
         else:
             path.addRect(self.logical_rect())

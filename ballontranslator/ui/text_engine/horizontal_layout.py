@@ -46,6 +46,45 @@ from .rendering.ruby import (
     ruby_side_margins,
 )
 
+
+def compute_polygon_scanline_span(pts: List[List[float]], y_val: float, avail_w: float, avail_h: float) -> Tuple[float, float]:
+    """Compute (x_left, width) for a horizontal scanline through a polygon."""
+    if not pts or len(pts) < 3:
+        return 0.0, avail_w
+    is_normalized = all(0.0 <= p[0] <= 1.05 and 0.0 <= p[1] <= 1.05 for p in pts)
+    scaled_pts = []
+    for p in pts:
+        if is_normalized:
+            scaled_pts.append((p[0] * avail_w, p[1] * avail_h))
+        else:
+            scaled_pts.append((p[0], p[1]))
+
+    x_intersections = []
+    n = len(scaled_pts)
+    for i in range(n):
+        p1 = scaled_pts[i]
+        p2 = scaled_pts[(i + 1) % n]
+        if (p1[1] <= y_val < p2[1]) or (p2[1] <= y_val < p1[1]):
+            if abs(p2[1] - p1[1]) > 1e-6:
+                x_int = p1[0] + (y_val - p1[1]) / (p2[1] - p1[1]) * (p2[0] - p1[0])
+                x_intersections.append(x_int)
+    if len(x_intersections) < 2:
+        return 0.0, avail_w
+    x_intersections.sort()
+    max_w = 0.0
+    best_span = (0.0, avail_w)
+    for k in range(0, len(x_intersections) - 1, 2):
+        x_left = max(0.0, x_intersections[k])
+        x_right = min(avail_w, x_intersections[k + 1])
+        span_w = x_right - x_left
+        if span_w > max_w:
+            max_w = span_w
+            best_span = (x_left, span_w)
+    if max_w <= 0:
+        return 0.0, avail_w
+    return best_span
+
+
 class HorizontalTextDocumentLayout(SceneTextLayout):
 
     def __init__(self, doc: QTextDocument, fontformat: FontFormat):
@@ -777,10 +816,7 @@ class HorizontalTextDocumentLayout(SceneTextLayout):
                     if selection_start <= absolute < selection_end:
                         painter.fillRect(cell_rect, brush)
 
-    def reLayout(self) -> None:
-        self._begin_layout_generation()
-        doc = self.document()
-        doc_margin = self._effect_padding
+    def _reset_layout_state(self) -> None:
         self.text_padding = 0
         self.shrink_height = 0
         self.shrink_width = 0
@@ -790,9 +826,20 @@ class HorizontalTextDocumentLayout(SceneTextLayout):
         self._ruby_metrics = []
         self._annotation_ink_bounds = QRectF()
         self._last_row_advance = None
+
+    def reLayout(self) -> None:
+        self._begin_layout_generation()
+        doc = self.document()
+        doc_margin = self._effect_padding
+        shape = getattr(self.fontformat, 'shape_type', 'rect')
+        poly_pts = getattr(self.fontformat, 'polygon_points', None)
+        is_shaped = (shape == 'ellipse') or (shape == 'polygon' and poly_pts)
+        is_centered = doc.defaultTextOption().alignment() == Qt.AlignmentFlag.AlignCenter
+
+        self._reset_layout_state()
         block = doc.firstBlock()
         while block.isValid():
-            self.layoutBlock(block)
+            self.layoutBlock(block, y_start_offset=0.0)
             block = block.next()
 
         if len(self.y_offset_lst) > 0:
@@ -804,7 +851,16 @@ class HorizontalTextDocumentLayout(SceneTextLayout):
             self.available_height = new_height
             self._emit_size_enlarged()
 
-        if doc.defaultTextOption().alignment() == Qt.AlignmentFlag.AlignCenter:
+        if is_shaped and is_centered:
+            y_shift = max(0.0, (self.available_height - new_height) / 2.0)
+            if y_shift > 1.0:
+                self._reset_layout_state()
+                block = doc.firstBlock()
+                while block.isValid():
+                    self.layoutBlock(block, y_start_offset=y_shift)
+                    block = block.next()
+                new_height = self.shrink_height if len(self.y_offset_lst) > 0 else doc_margin
+        elif is_centered:
             block = doc.firstBlock()
             y_offset = (self.max_height - new_height) / 2 - doc_margin
             while block.isValid():
@@ -893,7 +949,7 @@ class HorizontalTextDocumentLayout(SceneTextLayout):
             blk = blk.next()
         return blk.position() + off
 
-    def layoutBlock(self, block: QTextBlock) -> int:
+    def layoutBlock(self, block: QTextBlock, y_start_offset: float = 0.0) -> int:
         doc = self.document()
         block.clearLayout()
         tl = block.layout()
@@ -922,7 +978,7 @@ class HorizontalTextDocumentLayout(SceneTextLayout):
             self.y_offset_lst = []
             # y_offset = -tbr.top() - fm.ascent() + doc_margin
             # y_offset = min(br.top() - tbr.top(), -tbr.top() - fm.ascent()) + doc_margin
-            y_offset = doc_margin
+            y_offset = doc_margin + y_start_offset
         else:
             y_offset = self.y_offset_lst[-1]
 
@@ -958,12 +1014,20 @@ class HorizontalTextDocumentLayout(SceneTextLayout):
                 )
             ):
                 shared_space_row = None
-                if getattr(self.fontformat, 'shape_type', 'rect') == 'ellipse' and self.available_height > 0 and self.available_width > 0:
+                shape = getattr(self.fontformat, 'shape_type', 'rect')
+                poly_pts = getattr(self.fontformat, 'polygon_points', None)
+                if shape == 'polygon' and poly_pts and self.available_height > 0 and self.available_width > 0:
+                    line_y_center = (y_offset - doc_margin) + (block_height / 2.0)
+                    span_x, span_w = compute_polygon_scanline_span(poly_pts, line_y_center, self.available_width, self.available_height)
+                    line.setLineWidth(max(self.available_width * 0.15, span_w * 0.95))
+                elif shape == 'ellipse' and self.available_height > 0 and self.available_width > 0:
                     line_y_center = (y_offset - doc_margin) + (block_height / 2.0)
                     norm_y = (2.0 * line_y_center - self.available_height) / max(1.0, self.available_height)
-                    norm_y = max(-0.95, min(0.95, norm_y))
-                    ratio = math.sqrt(max(0.0, 1.0 - norm_y * norm_y))
-                    ellipse_width = max(self.available_width * 0.25, self.available_width * ratio)
+                    if abs(norm_y) >= 0.98:
+                        ellipse_width = self.available_width * 0.15
+                    else:
+                        ratio = math.sqrt(max(0.0, 1.0 - norm_y * norm_y))
+                        ellipse_width = max(self.available_width * 0.15, self.available_width * 0.92 * ratio)
                     line.setLineWidth(ellipse_width)
                 else:
                     line.setLineWidth(self.available_width)
@@ -1015,7 +1079,14 @@ class HorizontalTextDocumentLayout(SceneTextLayout):
                 else y_offset
             )
             line_y_offset += over_margin
-            if getattr(self.fontformat, 'shape_type', 'rect') == 'ellipse' and self.available_height > 0 and self.available_width > 0:
+            shape = getattr(self.fontformat, 'shape_type', 'rect')
+            poly_pts = getattr(self.fontformat, 'polygon_points', None)
+            if shape == 'polygon' and poly_pts and self.available_height > 0 and self.available_width > 0:
+                line_y_center = (y_offset - doc_margin) + (block_height / 2.0)
+                span_x, span_w = compute_polygon_scanline_span(poly_pts, line_y_center, self.available_width, self.available_height)
+                line_x_offset = doc_margin + span_x + max(0.0, (span_w - line.width()) / 2.0)
+                line.setPosition(QPointF(line_x_offset, line_y_offset + dy))
+            elif shape == 'ellipse' and self.available_height > 0 and self.available_width > 0:
                 line_x_offset = doc_margin + max(0.0, (self.available_width - line.width()) / 2.0)
                 line.setPosition(QPointF(line_x_offset, line_y_offset + dy))
             else:

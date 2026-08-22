@@ -133,6 +133,25 @@ class OCRBase(BaseModule):
 
             if y1c < y2c and x1c < x2c:
                 cropped_img = img[y1c:y2c, x1c:x2c]
+                ch, cw = cropped_img.shape[:2]
+                shape = getattr(blk, 'shape_type', 'rect')
+                poly_pts = getattr(blk, 'polygon_points', None)
+                if shape == 'polygon' and poly_pts and len(poly_pts) >= 3:
+                    cropped_img = cropped_img.copy()
+                    mask = np.zeros((ch, cw), dtype=np.uint8)
+                    is_norm = all(0.0 <= p[0] <= 1.05 and 0.0 <= p[1] <= 1.05 for p in poly_pts)
+                    if is_norm:
+                        pts_arr = np.array([[int(p[0] * cw), int(p[1] * ch)] for p in poly_pts], dtype=np.int32)
+                    else:
+                        pts_arr = np.array(poly_pts, dtype=np.int32)
+                    cv2.fillPoly(mask, [pts_arr], 255)
+                    cropped_img[mask == 0] = 255
+                elif shape == 'ellipse' and ch > 4 and cw > 4:
+                    cropped_img = cropped_img.copy()
+                    mask = np.zeros((ch, cw), dtype=np.uint8)
+                    cv2.ellipse(mask, (cw // 2, ch // 2), (cw // 2, ch // 2), 0, 0, 360, 255, -1)
+                    cropped_img[mask == 0] = 255
+
                 blk.text = self.ocr_img(cropped_img, **kwargs)
             else:
                 blk.text = ""

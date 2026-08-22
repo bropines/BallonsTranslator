@@ -9,8 +9,7 @@ import enum
 import math
 from numbers import Real
 import re
-import copy
-from typing import ClassVar, Iterator, Mapping, Sequence, Set, Tuple
+from typing import ClassVar, Iterator, Mapping, Optional, Sequence, Set, Tuple
 
 import numpy as np
 
@@ -735,6 +734,7 @@ class FontFormat(Config):
     line_spacing_type: int = LineSpacingType.Proportional
     shape_type: str = 'rect'
     auto_hyphenate: bool = False
+    polygon_points: Optional[List[List[float]]] = None
 
     # Runtime owns one value; persistence keeps its existing list and flat
     # Glyph Slant fields for project/config compatibility.
@@ -862,12 +862,21 @@ class FontFormat(Config):
                 )
                 setattr(self, name, 'default')
 
-        if self.shape_type not in {'rect', 'ellipse'}:
+        if self.shape_type not in {'rect', 'ellipse', 'polygon'}:
             LOGGER.warning(
                 'Ignoring invalid shape type (%r); using "rect".',
                 self.shape_type,
             )
             self.shape_type = 'rect'
+
+        if self.polygon_points is not None:
+            if not isinstance(self.polygon_points, (list, tuple)) or len(self.polygon_points) < 3:
+                self.polygon_points = None
+            else:
+                try:
+                    self.polygon_points = [[float(p[0]), float(p[1])] for p in self.polygon_points]
+                except Exception:
+                    self.polygon_points = None
 
         if not isinstance(self.auto_hyphenate, bool):
             LOGGER.warning(

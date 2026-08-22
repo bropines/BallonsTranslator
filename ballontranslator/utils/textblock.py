@@ -297,6 +297,35 @@ class TextBlock:
     def auto_hyphenate(self, value: bool) -> None:
         self.fontformat.auto_hyphenate = value
 
+    @property
+    def polygon_points(self) -> Optional[List[List[float]]]:
+        return self.fontformat.polygon_points
+
+    @polygon_points.setter
+    def polygon_points(self, value: Optional[List[List[float]]]) -> None:
+        self.fontformat.polygon_points = value
+
+    def get_polygon_mask(self, shape: Tuple[int, int] = None) -> Optional[np.ndarray]:
+        """Generate a binary mask (uint8 0/255) of the text block polygon.
+
+        If shape is not specified, generates mask for the local bounding box.
+        """
+        pts = self.polygon_points
+        if not pts or len(pts) < 3:
+            return None
+        pts_arr = np.array(pts, dtype=np.int32)
+        if shape is None:
+            w = max(1, self.xyxy[2] - self.xyxy[0])
+            h = max(1, self.xyxy[3] - self.xyxy[1])
+            # Shift points to local bbox origin
+            pts_arr[:, 0] -= self.xyxy[0]
+            pts_arr[:, 1] -= self.xyxy[1]
+            mask = np.zeros((h, w), dtype=np.uint8)
+        else:
+            mask = np.zeros(shape, dtype=np.uint8)
+        cv2.fillPoly(mask, [pts_arr], 255)
+        return mask
+
     def __post_init__(self) -> None:
         self.text_alpha_mask = load_text_alpha_mask(self.text_alpha_mask)
         if self.xyxy is not None:

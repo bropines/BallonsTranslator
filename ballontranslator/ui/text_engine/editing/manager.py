@@ -377,6 +377,7 @@ class SceneTextManager(QObject):
         self.canvas = canvas
         canvas.switch_text_item.connect(self.on_switch_textitem)
         self.canvas.end_create_textblock.connect(self.onEndCreateTextBlock)
+        self.canvas.end_create_polygon_textblock.connect(self.onEndCreatePolygonTextBlock)
         self.canvas.paste2selected_textitems.connect(self.on_paste2selected_textitems)
         self.canvas.delete_textblks.connect(self.onDeleteBlkItems)
         self.canvas.copy_textblks.connect(self.onCopyBlkItems)
@@ -1077,8 +1078,28 @@ class SceneTextManager(QObject):
         xywh[[2, 3]] -= xywh[[0, 1]]
         block.set_lines_by_xywh(xywh)
         block.src_is_vertical = self.formatpanel.global_format.vertical
+        tool_mode = getattr(self.canvas, 'creation_tool_mode', 'rect')
+        shape_type = 'ellipse' if tool_mode == 'ellipse' else 'rect'
+        block.shape_type = shape_type
         blk_item = TextBlkItem(block, len(self.textblk_item_list), set_format=False, show_rect=True)
         blk_item.set_fontformat(self.formatpanel.global_format)
+        blk_item.setShapeType(shape_type)
+        self.canvas.push_undo_command(CreateItemCommand(blk_item, self))
+
+    def onEndCreatePolygonTextBlock(self, rect: QRectF, points: list):
+        xyxy = np.array([rect.x(), rect.y(), rect.right(), rect.bottom()])        
+        xyxy = np.round(xyxy).astype(np.int32)
+        block = TextBlock(xyxy)
+        xywh = np.copy(xyxy)
+        xywh[[2, 3]] -= xywh[[0, 1]]
+        block.set_lines_by_xywh(xywh)
+        block.src_is_vertical = self.formatpanel.global_format.vertical
+        block.shape_type = 'polygon'
+        block.polygon_points = points
+        blk_item = TextBlkItem(block, len(self.textblk_item_list), set_format=False, show_rect=True)
+        blk_item.set_fontformat(self.formatpanel.global_format)
+        blk_item.setShapeType('polygon')
+        blk_item.fontformat.polygon_points = points
         self.canvas.push_undo_command(CreateItemCommand(blk_item, self))
 
     def on_paste2selected_textitems(self):

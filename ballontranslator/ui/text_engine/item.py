@@ -1596,7 +1596,6 @@ class TextBlkItem(QGraphicsTextItem):
             self.layout.reLayout()
             self.visual_geometry_changed.emit()
             self.update()
-            self.repaint_background()
             scene = self.scene()
             if scene is not None:
                 if hasattr(scene, 'txtblkShapeControl'):
@@ -1609,8 +1608,14 @@ class TextBlkItem(QGraphicsTextItem):
         self.repainting = False
         if set_stroke_width:
             self.repaint_background()
+        if self.fontformat.gradient_enabled:
+            self._refresh_gradient_geometry()
+            self.update()
 
     def apply_hyphenation(self, enable: bool = True):
+        doc = self.document()
+        if doc is None or doc.isEmpty():
+            return
         cursor = self.textCursor()
         cursor.select(QTextCursor.SelectionType.Document)
         text = cursor.selectedText()
@@ -1621,7 +1626,11 @@ class TextBlkItem(QGraphicsTextItem):
         else:
             new_text = strip_soft_hyphens(text)
         if new_text != text:
-            cursor.insertText(new_text)
+            self.block_change_signal = True
+            try:
+                cursor.insertText(new_text)
+            finally:
+                self.block_change_signal = False
             self.layout.reLayout()
             self.visual_geometry_changed.emit()
 
@@ -1635,7 +1644,6 @@ class TextBlkItem(QGraphicsTextItem):
         self.layout.reLayout()
         self.visual_geometry_changed.emit()
         self.update()
-        self.repaint_background()
         scene = self.scene()
         if scene is not None:
             if hasattr(scene, 'txtblkShapeControl'):

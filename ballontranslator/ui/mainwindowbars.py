@@ -633,7 +633,40 @@ class BottomBar(Widget):
         self.texteditChecker.clicked.connect(self.onTextEditCheckerPressed)
         self.textblockChecker = QCheckBox()
         self.textblockChecker.setObjectName('TextblockChecker')
+        self.textblockChecker.setToolTip(self.tr('Toggle text block mode'))
         self.textblockChecker.clicked.connect(self.onTextblockCheckerClicked)
+
+        self.toolRectChecker = QCheckBox()
+        self.toolRectChecker.setObjectName('BottomToolRectChecker')
+        self.toolRectChecker.setToolTip(self.tr('Rectangle Balloon Tool (R / U)'))
+        self.toolRectChecker.clicked.connect(lambda: self.on_creation_tool_clicked('rect'))
+        self.toolRectChecker.setChecked(True)
+        self.toolRectChecker.hide()
+
+        self.toolEllipseChecker = QCheckBox()
+        self.toolEllipseChecker.setObjectName('BottomToolEllipseChecker')
+        self.toolEllipseChecker.setToolTip(self.tr('Ellipse / Oval Balloon Tool (O / E)'))
+        self.toolEllipseChecker.clicked.connect(lambda: self.on_creation_tool_clicked('ellipse'))
+        self.toolEllipseChecker.hide()
+
+        self.toolPenChecker = QCheckBox()
+        self.toolPenChecker.setObjectName('BottomToolPenChecker')
+        self.toolPenChecker.setToolTip(self.tr('Polygon Pen Tool: Shift+LMB to add points, RMB to finish'))
+        self.toolPenChecker.clicked.connect(lambda: self.on_creation_tool_clicked('polygon_pen'))
+        self.toolPenChecker.hide()
+
+        self.toolFreehandChecker = QCheckBox()
+        self.toolFreehandChecker.setObjectName('BottomToolFreehandChecker')
+        self.toolFreehandChecker.setToolTip(self.tr('Freehand Lasso Tool: Shift+LMB drag to draw outline'))
+        self.toolFreehandChecker.clicked.connect(lambda: self.on_creation_tool_clicked('freehand_lasso'))
+        self.toolFreehandChecker.hide()
+
+        self.creation_tools = [
+            self.toolRectChecker,
+            self.toolEllipseChecker,
+            self.toolPenChecker,
+            self.toolFreehandChecker,
+        ]
         
         self.originalSlider = PaintQSlider(self.tr("Original image opacity"), Qt.Orientation.Horizontal, self)
         self.originalSlider.setFixedWidth(150)
@@ -657,8 +690,34 @@ class BottomBar(Widget):
         self.hlayout.addWidget(self.paintChecker)
         self.hlayout.addWidget(self.texteditChecker)
         self.hlayout.addWidget(self.textblockChecker)
+        self.hlayout.addWidget(self.toolRectChecker)
+        self.hlayout.addWidget(self.toolEllipseChecker)
+        self.hlayout.addWidget(self.toolPenChecker)
+        self.hlayout.addWidget(self.toolFreehandChecker)
         self.hlayout.setContentsMargins(60, 0, 10, WINDOW_BORDER_WIDTH)
 
+
+    def set_creation_tools_visible(self, visible: bool):
+        for chk in self.creation_tools:
+            chk.setVisible(visible)
+
+    def on_creation_tool_clicked(self, tool_name: str):
+        for name, chk in [
+            ('rect', self.toolRectChecker),
+            ('ellipse', self.toolEllipseChecker),
+            ('polygon_pen', self.toolPenChecker),
+            ('freehand_lasso', self.toolFreehandChecker),
+        ]:
+            chk.setChecked(name == tool_name)
+        canvas = getattr(self.mainwindow, 'canvas', None)
+        if canvas is not None:
+            canvas.creation_tool_mode = tool_name
+            if tool_name not in ('polygon_pen', 'freehand_lasso'):
+                canvas.cancel_polygon_creation()
+            sel_items = canvas.selected_text_items()
+            if sel_items and tool_name in ('rect', 'ellipse'):
+                for item in sel_items:
+                    item.setShapeType(tool_name)
 
     def onPaintCheckerPressed(self):
         checked = self.paintChecker.isChecked()
@@ -672,7 +731,11 @@ class BottomBar(Widget):
         if checked:
             self.paintChecker.setChecked(False)
         pcfg.imgtrans_textedit = checked
+        if not checked:
+            self.set_creation_tools_visible(False)
         self.textedit_checkchanged.emit()
 
     def onTextblockCheckerClicked(self):
+        checked = self.textblockChecker.isChecked()
+        self.set_creation_tools_visible(checked)
         self.textblock_checkchanged.emit()

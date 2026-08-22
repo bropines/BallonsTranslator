@@ -1525,6 +1525,22 @@ QFontChecker#FontShapeChecker::indicator:checked {
     image: url(resources/icons/fontfmt_ellipse_activate.svg);
 }
 
+QFontChecker#FontPenChecker::indicator {
+    image: url(resources/icons/tool_polygon_pen.svg);
+}
+
+QFontChecker#FontPenChecker::indicator:checked {
+    image: url(resources/icons/tool_polygon_pen_activate.svg);
+}
+
+QFontChecker#FontFreehandChecker::indicator {
+    image: url(resources/icons/tool_freehand.svg);
+}
+
+QFontChecker#FontFreehandChecker::indicator:checked {
+    image: url(resources/icons/tool_freehand_activate.svg);
+}
+
 QFontChecker#FontHyphenChecker::indicator {
     image: url(resources/icons/fontfmt_hyphen.svg);
 }
@@ -1859,6 +1875,58 @@ QCheckBox#TextblockChecker::indicator:hover {
 
 QCheckBox#TextblockChecker::indicator:checked{
     image: url(resources/icons/bottombar_textblock_activate.svg);
+}
+
+QCheckBox#BottomToolRectChecker::indicator,
+QCheckBox#BottomToolEllipseChecker::indicator,
+QCheckBox#BottomToolPenChecker::indicator,
+QCheckBox#BottomToolFreehandChecker::indicator {
+    padding-left: 5px;
+    padding-right: 5px;
+    padding-top: 3px;
+    padding-bottom: 3px;
+    height: 24px;
+    width: 24px;
+    border-radius: 4px;
+}
+
+QCheckBox#BottomToolRectChecker::indicator {
+    image: url(resources/icons/bottombar_textblock.svg);
+}
+QCheckBox#BottomToolRectChecker::indicator:checked {
+    image: url(resources/icons/bottombar_textblock_activate.svg);
+    background-color: rgba(30, 147, 229, 25%);
+}
+
+QCheckBox#BottomToolEllipseChecker::indicator {
+    image: url(resources/icons/fontfmt_ellipse.svg);
+}
+QCheckBox#BottomToolEllipseChecker::indicator:checked {
+    image: url(resources/icons/fontfmt_ellipse_activate.svg);
+    background-color: rgba(30, 147, 229, 25%);
+}
+
+QCheckBox#BottomToolPenChecker::indicator {
+    image: url(resources/icons/tool_polygon_pen.svg);
+}
+QCheckBox#BottomToolPenChecker::indicator:checked {
+    image: url(resources/icons/tool_polygon_pen_activate.svg);
+    background-color: rgba(30, 147, 229, 25%);
+}
+
+QCheckBox#BottomToolFreehandChecker::indicator {
+    image: url(resources/icons/tool_freehand.svg);
+}
+QCheckBox#BottomToolFreehandChecker::indicator:checked {
+    image: url(resources/icons/tool_freehand_activate.svg);
+    background-color: rgba(30, 147, 229, 25%);
+}
+
+QCheckBox#BottomToolRectChecker::indicator:hover,
+QCheckBox#BottomToolEllipseChecker::indicator:hover,
+QCheckBox#BottomToolPenChecker::indicator:hover,
+QCheckBox#BottomToolFreehandChecker::indicator:hover {
+    background-color: rgba(30, 147, 229, 20%);
 }
 
 OpenBtn {
