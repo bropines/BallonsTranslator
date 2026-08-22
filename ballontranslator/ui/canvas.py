@@ -935,10 +935,10 @@ class Canvas(QGraphicsScene):
         ys = [p.y() for p in self._polygon_pen_points]
         min_x, min_y, max_x, max_y = min(xs), min(ys), max(xs), max(ys)
         w, h = max(10.0, max_x - min_x), max(10.0, max_y - min_y)
-        rel_pts = [[float(p.x() - min_x), float(p.y() - min_y)] for p in self._polygon_pen_points]
+        norm_pts = [[float((p.x() - min_x) / w), float((p.y() - min_y) / h)] for p in self._polygon_pen_points]
         rect = QRectF(min_x, min_y, w, h)
         self.cancel_polygon_creation()
-        self.end_create_polygon_textblock.emit(rect, rel_pts)
+        self.end_create_polygon_textblock.emit(rect, norm_pts)
         return True
 
     def _finish_freehand_lasso(self) -> bool:
@@ -955,10 +955,10 @@ class Canvas(QGraphicsScene):
         ys = [p.y() for p in simplified]
         min_x, min_y, max_x, max_y = min(xs), min(ys), max(xs), max(ys)
         w, h = max(10.0, max_x - min_x), max(10.0, max_y - min_y)
-        rel_pts = [[float(p.x() - min_x), float(p.y() - min_y)] for p in simplified]
+        norm_pts = [[float((pt.x() - min_x) / w), float((pt.y() - min_y) / h)] for pt in simplified]
         rect = QRectF(min_x, min_y, w, h)
         self.cancel_polygon_creation()
-        self.end_create_polygon_textblock.emit(rect, rel_pts)
+        self.end_create_polygon_textblock.emit(rect, norm_pts)
         return True
 
     @property

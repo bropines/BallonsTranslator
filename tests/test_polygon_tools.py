@@ -54,6 +54,29 @@ class PolygonToolsTest(unittest.TestCase):
         span_x_top, span_w_top = compute_polygon_scanline_span(triangle_pts, 10.0, 100.0, 100.0)
         self.assertLess(span_w_top, span_w)
 
+    def test_polygon_scaling_with_geometry(self):
+        from ballontranslator.ui.text_engine.item import TextBlkItem
+        blk = TextBlock([0, 0, 100, 100])
+        blk.shape_type = 'polygon'
+        # Normalized triangle vertices
+        blk.polygon_points = [[0.5, 0.0], [1.0, 1.0], [0.0, 1.0]]
+        item = TextBlkItem(blk, 0, set_format=False, show_rect=True)
+        fmt = FontFormat(shape_type='polygon', polygon_points=[[0.5, 0.0], [1.0, 1.0], [0.0, 1.0]])
+        item.set_fontformat(fmt)
+
+        # Initial outline at 100x100
+        path1 = item.geometry_controller.visual_outline_in_item()
+        rect1 = path1.boundingRect()
+        self.assertAlmostEqual(rect1.width(), 100.0, delta=1.0)
+        self.assertAlmostEqual(rect1.height(), 100.0, delta=1.0)
+
+        # Resize item to 50x200 (compressed width, stretched height)
+        item.setRect(QRectF(0, 0, 50, 200))
+        path2 = item.geometry_controller.visual_outline_in_item()
+        rect2 = path2.boundingRect()
+        self.assertAlmostEqual(rect2.width(), 50.0, delta=1.0)
+        self.assertAlmostEqual(rect2.height(), 200.0, delta=1.0)
+
 
 if __name__ == '__main__':
     unittest.main()

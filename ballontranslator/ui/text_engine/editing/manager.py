@@ -1095,6 +1095,16 @@ class SceneTextManager(QObject):
         block.set_lines_by_xywh(xywh)
         block.src_is_vertical = self.formatpanel.global_format.vertical
         block.shape_type = 'polygon'
+        if points:
+            is_norm = all(0.0 <= p[0] <= 1.05 and 0.0 <= p[1] <= 1.05 for p in points)
+            if not is_norm:
+                xs = [p[0] for p in points]
+                ys = [p[1] for p in points]
+                min_x, max_x = min(xs), max(xs)
+                min_y, max_y = min(ys), max(ys)
+                poly_w = max(1.0, max_x - min_x)
+                poly_h = max(1.0, max_y - min_y)
+                points = [[(p[0] - min_x) / poly_w, (p[1] - min_y) / poly_h] for p in points]
         block.polygon_points = points
         blk_item = TextBlkItem(block, len(self.textblk_item_list), set_format=False, show_rect=True)
         blk_item.set_fontformat(self.formatpanel.global_format)

@@ -300,17 +300,19 @@ class TextItemGeometryController:
             lr = self.logical_rect()
             w, h = max(1.0, lr.width()), max(1.0, lr.height())
             is_norm = all(0.0 <= p[0] <= 1.05 and 0.0 <= p[1] <= 1.05 for p in poly_pts)
-            p0 = QPointF(
-                poly_pts[0][0] * w if is_norm else poly_pts[0][0],
-                poly_pts[0][1] * h if is_norm else poly_pts[0][1],
-            )
+            if not is_norm:
+                xs = [p[0] for p in poly_pts]
+                ys = [p[1] for p in poly_pts]
+                min_x, max_x = min(xs), max(xs)
+                min_y, max_y = min(ys), max(ys)
+                poly_w = max(1.0, max_x - min_x)
+                poly_h = max(1.0, max_y - min_y)
+                poly_pts = [[(p[0] - min_x) / poly_w, (p[1] - min_y) / poly_h] for p in poly_pts]
+
+            p0 = QPointF(poly_pts[0][0] * w, poly_pts[0][1] * h)
             path.moveTo(p0)
             for pt in poly_pts[1:]:
-                p_next = QPointF(
-                    pt[0] * w if is_norm else pt[0],
-                    pt[1] * h if is_norm else pt[1],
-                )
-                path.lineTo(p_next)
+                path.lineTo(QPointF(pt[0] * w, pt[1] * h))
             path.closeSubpath()
         elif shape == 'ellipse':
             path.addEllipse(self.logical_rect())
