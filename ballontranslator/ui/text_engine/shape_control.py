@@ -969,6 +969,15 @@ class TextBlkShapeControl(QGraphicsRectItem):
                 painter.drawRect(self.rect())
         else:
             painter.drawPath(path)
+            if self.blk_item is not None and getattr(self.blk_item.fontformat, 'shape_type', 'rect') == 'polygon':
+                poly_pts = getattr(self.blk_item.fontformat, 'polygon_points', None)
+                if poly_pts and len(poly_pts) >= 3:
+                    lr = self.blk_item.logical_rect()
+                    w, h = max(1.0, lr.width()), max(1.0, lr.height())
+                    painter.setBrush(QBrush(QColor(240, 50, 130)))
+                    painter.setPen(QPen(QColor(255, 255, 255), 1.5))
+                    for p in poly_pts:
+                        painter.drawEllipse(QPointF(p[0] * w, p[1] * h), 4.0, 4.0)
         painter.restore()
 
     def hideControls(self):

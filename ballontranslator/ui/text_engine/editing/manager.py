@@ -103,6 +103,33 @@ class CreateItemCommand(QUndoCommand):
         self.ctrl.deleteTextblkItemList([self.blk_item], [self.pairw])
 
 
+class ModifyPolygonPointsCommand(QUndoCommand):
+    def __init__(self, blk_item: TextBlkItem, old_points: list, new_points: list, ctrl, parent=None):
+        super().__init__(parent)
+        self.blk_item = blk_item
+        self.old_points = [list(p) for p in old_points]
+        self.new_points = [list(p) for p in new_points]
+        self.ctrl = ctrl
+
+    def redo(self):
+        self._apply_points(self.new_points)
+
+    def undo(self):
+        self._apply_points(self.old_points)
+
+    def _apply_points(self, points):
+        pts = [list(p) for p in points]
+        self.blk_item.fontformat.polygon_points = pts
+        self.blk_item.blk.polygon_points = pts
+        self.blk_item.fontformat_changed.emit()
+        self.blk_item.visual_geometry_changed.emit()
+        self.blk_item.layout.reLayout()
+        self.blk_item.update()
+        if self.ctrl and getattr(self.ctrl, 'txtblkShapeControl', None):
+            self.ctrl.txtblkShapeControl.updateBoundingRect()
+            self.ctrl.txtblkShapeControl.update()
+
+
 class DeleteBlkItemsCommand(QUndoCommand):
     def __init__(self, blk_list: List[TextBlkItem], mode: int, ctrl, parent=None):
         super().__init__(parent)

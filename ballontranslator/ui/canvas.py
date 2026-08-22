@@ -961,6 +961,45 @@ class Canvas(QGraphicsScene):
         self.end_create_polygon_textblock.emit(rect, norm_pts)
         return True
 
+    def _find_polygon_vertex_or_edge_at(self, scene_pos: QPointF, tolerance_px: float = 14.0):
+        """Finds if scene_pos is near a vertex or edge of a selected polygon text item."""
+        sel_items = self.selected_text_items()
+        for item in sel_items:
+            shape = getattr(item.fontformat, 'shape_type', 'rect')
+            poly_pts = getattr(item.fontformat, 'polygon_points', None)
+            if shape != 'polygon' or not poly_pts or len(poly_pts) < 3:
+                continue
+
+            lr = item.logical_rect()
+            w, h = max(1.0, lr.width()), max(1.0, lr.height())
+            local_pos = item.mapFromScene(scene_pos)
+            
+            # 1. Check vertices first
+            for idx, p in enumerate(poly_pts):
+                v_pos = QPointF(p[0] * w, p[1] * h)
+                dist = (local_pos - v_pos).manhattanLength()
+                if dist <= tolerance_px:
+                    return item, 'vertex', idx, v_pos, [p[0], p[1]]
+
+            # 2. Check edges
+            n = len(poly_pts)
+            for i in range(n):
+                p1 = QPointF(poly_pts[i][0] * w, poly_pts[i][1] * h)
+                p2 = QPointF(poly_pts[(i + 1) % n][0] * w, poly_pts[(i + 1) % n][1] * h)
+                edge_vec = p2 - p1
+                edge_len_sq = edge_vec.x() ** 2 + edge_vec.y() ** 2
+                if edge_len_sq < 1e-6:
+                    continue
+                pt_vec = local_pos - p1
+                t = max(0.0, min(1.0, (pt_vec.x() * edge_vec.x() + pt_vec.y() * edge_vec.y()) / edge_len_sq))
+                proj = p1 + edge_vec * t
+                dist = (local_pos - proj).manhattanLength()
+                if dist <= tolerance_px:
+                    norm_proj = [proj.x() / w, proj.y() / h]
+                    return item, 'edge', i, proj, norm_proj
+
+        return None, None, -1, None, None
+
     @property
     def path_reorder_active(self) -> bool:
         return self._path_reorder_active
@@ -1167,6 +1206,29 @@ class Canvas(QGraphicsScene):
             self.hscroll_bar.setValue(int(self.hscroll_bar.value() - delta_pos.x()))
             self.vscroll_bar.setValue(int(self.vscroll_bar.value() - delta_pos.y()))
             
+        if getattr(self, '_polygon_drag_item', None) is not None:
+            item = self._polygon_drag_item
+            idx = self._polygon_drag_vertex_idx
+            lr = item.logical_rect()
+            w, h = max(1.0, lr.width()), max(1.0, lr.height())
+            local_pos = item.mapFromScene(event.scenePos())
+            new_norm_x = local_pos.x() / w
+            new_norm_y = local_pos.y() / h
+            pts = [list(p) for p in item.fontformat.polygon_points]
+            if 0 <= idx < len(pts):
+                pts[idx] = [new_norm_x, new_norm_y]
+                item.fontformat.polygon_points = pts
+                item.blk.polygon_points = pts
+                item.fontformat_changed.emit()
+                item.visual_geometry_changed.emit()
+                item.layout.reLayout()
+                item.update()
+                if self.txtblkShapeControl:
+                    self.txtblkShapeControl.updateBoundingRect()
+                    self.txtblkShapeControl.update()
+            event.accept()
+            return
+
         elif self.creating_textblock:
             self.txtblkShapeControl.setRect(QRectF(self.create_block_origin, event.scenePos() / self.scale_factor).normalized())
         
@@ -1293,12 +1355,55 @@ class Canvas(QGraphicsScene):
         
         if self.imgtrans_proj.img_valid:
             if self.textEditMode():
+                modifiers = event.modifiers() or QApplication.keyboardModifiers()
+                is_alt = bool(modifiers & Qt.KeyboardModifier.AltModifier)
+                if is_alt:
+                    item, hit_type, hit_idx, hit_pt, norm_pt = self._find_polygon_vertex_or_edge_at(event.scenePos())
+                    if item is not None:
+                        if btn == Qt.MouseButton.LeftButton:
+                            pts = [list(p) for p in item.fontformat.polygon_points]
+                            self._polygon_drag_initial_pts = [list(p) for p in pts]
+                            self._polygon_drag_item = item
+                            if hit_type == 'vertex':
+                                self._polygon_drag_vertex_idx = hit_idx
+                            elif hit_type == 'edge':
+                                pts.insert(hit_idx + 1, norm_pt)
+                                item.fontformat.polygon_points = pts
+                                item.blk.polygon_points = pts
+                                self._polygon_drag_vertex_idx = hit_idx + 1
+                                item.fontformat_changed.emit()
+                                item.visual_geometry_changed.emit()
+                                item.layout.reLayout()
+                                item.update()
+                                if self.txtblkShapeControl:
+                                    self.txtblkShapeControl.updateBoundingRect()
+                                    self.txtblkShapeControl.update()
+                            event.accept()
+                            return
+                        elif btn == Qt.MouseButton.RightButton and hit_type == 'vertex':
+                            pts = [list(p) for p in item.fontformat.polygon_points]
+                            if len(pts) > 3:
+                                old_pts = [list(p) for p in pts]
+                                pts.pop(hit_idx)
+                                item.fontformat.polygon_points = pts
+                                item.blk.polygon_points = pts
+                                item.fontformat_changed.emit()
+                                item.visual_geometry_changed.emit()
+                                item.layout.reLayout()
+                                item.update()
+                                if self.txtblkShapeControl:
+                                    self.txtblkShapeControl.updateBoundingRect()
+                                    self.txtblkShapeControl.update()
+                                from ballontranslator.ui.text_engine.editing.manager import ModifyPolygonPointsCommand
+                                self.push_undo_command(ModifyPolygonPointsCommand(item, old_pts, pts, getattr(self, 'st_manager', None)))
+                                event.accept()
+                                return
+
                 items_at = self.items(event.scenePos())
                 has_text_item = any(
                     isinstance(item, TextBlkItem) or item.data(CONTROL_ITEM_DATA_KEY)
                     for item in items_at
                 )
-                modifiers = event.modifiers() or QApplication.keyboardModifiers()
                 is_shift = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
 
                 if self.creation_tool_mode == 'polygon_pen':
@@ -1386,6 +1491,18 @@ class Canvas(QGraphicsScene):
     def mouseReleaseEvent(self, event: QGraphicsSceneMouseEvent) -> None:
         btn = event.button()
         if self.alpha_mask_edit_session.handle_mouse_release(event):
+            return
+        if getattr(self, '_polygon_drag_item', None) is not None and btn == Qt.MouseButton.LeftButton:
+            item = self._polygon_drag_item
+            initial_pts = getattr(self, '_polygon_drag_initial_pts', None)
+            current_pts = [list(p) for p in item.fontformat.polygon_points]
+            self._polygon_drag_item = None
+            self._polygon_drag_vertex_idx = -1
+            self._polygon_drag_initial_pts = None
+            if initial_pts is not None and initial_pts != current_pts:
+                from ballontranslator.ui.text_engine.editing.manager import ModifyPolygonPointsCommand
+                self.push_undo_command(ModifyPolygonPointsCommand(item, initial_pts, current_pts, getattr(self, 'st_manager', None)))
+            event.accept()
             return
         if self._freehand_active and btn == Qt.MouseButton.LeftButton:
             self._finish_freehand_lasso()
