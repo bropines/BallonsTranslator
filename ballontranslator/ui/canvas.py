@@ -1750,7 +1750,35 @@ class Canvas(QGraphicsScene):
             self._polygon_drag_item = None
             self._polygon_drag_vertex_idx = -1
             self._polygon_drag_initial_pts = None
+            # Mathematically exact auto-expand bounding box when vertices exceed [0.0, 1.0]
+            lr = item.rect()
+            w, h = max(1.0, lr.width()), max(1.0, lr.height())
+            local_pts = [QPointF(p[0] * w, p[1] * h) for p in current_pts]
+            xs = [pt.x() for pt in local_pts]
+            ys = [pt.y() for pt in local_pts]
+            min_x, max_x = min(xs), max(xs)
+            min_y, max_y = min(ys), max(ys)
+            if min_x < -0.01 or max_x > w + 0.01 or min_y < -0.01 or max_y > h + 0.01:
+                exp_left = min(0.0, min_x)
+                exp_top = min(0.0, min_y)
+                exp_w = max(w, max_x) - exp_left
+                exp_h = max(h, max_y) - exp_top
+                new_origin = QPointF(exp_w / 2.0, exp_h / 2.0)
+                new_scene_center = item.mapToScene(QPointF(exp_left + exp_w / 2.0, exp_top + exp_h / 2.0))
+                new_pos = new_scene_center - new_origin
 
+                item.prepareGeometryChange()
+                item.setPos(new_pos)
+                item.setTransformOriginPoint(new_origin)
+                item.geometry_controller.display_rect = QRectF(0, 0, exp_w, exp_h)
+                item.layout.setMaxSize(exp_w, exp_h)
+
+                renorm_pts = [[(pt.x() - exp_left) / exp_w, (pt.y() - exp_top) / exp_h] for pt in local_pts]
+                item.fontformat.polygon_points = renorm_pts
+                item.blk.fontformat.polygon_points = renorm_pts
+                item.blk.polygon_points = renorm_pts
+                item.blk._bounding_rect = item.absBoundingRect()
+                current_pts = renorm_pts
 
             if initial_pts is not None and initial_pts != current_pts:
                 from ballontranslator.ui.text_engine.editing.manager import ModifyPolygonPointsCommand
