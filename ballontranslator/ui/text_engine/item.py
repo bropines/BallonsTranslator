@@ -1203,17 +1203,6 @@ class TextBlkItem(QGraphicsTextItem):
             painter.setPen(pen)
             painter.setBrush(QBrush(Qt.BrushStyle.NoBrush))
             painter.drawPath(outline)
-
-            # Draw vertex circles on polygon shapes
-            shape = getattr(self.fontformat, 'shape_type', 'rect')
-            poly_pts = getattr(self.fontformat, 'polygon_points', None)
-            if shape == 'polygon' and poly_pts and len(poly_pts) >= 3:
-                lr = self.rect()
-                w, h = max(1.0, lr.width()), max(1.0, lr.height())
-                painter.setBrush(QBrush(QColor(240, 50, 130)))
-                painter.setPen(QPen(QColor(255, 255, 255), 1.5))
-                for p in poly_pts:
-                    painter.drawEllipse(QPointF(p[0] * w, p[1] * h), 4.5, 4.5)
         finally:
             painter.restore()
 

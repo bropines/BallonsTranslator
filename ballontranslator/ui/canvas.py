@@ -179,7 +179,10 @@ class CustomGV(QGraphicsView):
 
     def contextMenuEvent(self, event) -> None:
         modifiers = event.modifiers() or QApplication.keyboardModifiers()
-        if bool(modifiers & (Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.MetaModifier)):
+        is_alt = bool(modifiers & (Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.MetaModifier))
+        if is_alt or (self.canvas is not None and getattr(self.canvas, '_suppress_context_menu_once', False)):
+            if self.canvas is not None:
+                self.canvas._suppress_context_menu_once = False
             event.accept()
             return
         super().contextMenuEvent(event)
@@ -1065,9 +1068,30 @@ class Canvas(QGraphicsScene):
 
     def drawForeground(self, painter: QPainter, rect: QRectF) -> None:
         super().drawForeground(painter, rect)
+        
+        # 1. Render all polygon vertex circles in scene coordinates (never clipped by item bounds)
+        if hasattr(self, 'textLayer') and self.textLayer is not None and self.textblock_mode:
+            painter.save()
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+            painter.setBrush(QBrush(QColor(240, 50, 130)))
+            painter.setPen(QPen(QColor(255, 255, 255), 1.5))
+            for itm in self.textLayer.childItems():
+                if isinstance(itm, TextBlkItem) and itm.isVisible():
+                    shape = getattr(itm.fontformat, 'shape_type', 'rect')
+                    poly_pts = getattr(itm.fontformat, 'polygon_points', None)
+                    if shape == 'polygon' and poly_pts and len(poly_pts) >= 3:
+                        lr = itm.rect()
+                        w, h = max(1.0, lr.width()), max(1.0, lr.height())
+                        for p in poly_pts:
+                            v_scene = itm.mapToScene(QPointF(p[0] * w, p[1] * h))
+                            painter.drawEllipse(v_scene, 4.5, 4.5)
+            painter.restore()
+
+        # 2. Render hover indicator dot (cyan with white border)
         hover_pt = getattr(self, '_hover_indicator_scene_pos', None)
         if hover_pt is not None and getattr(self, '_alt_hover_active', False):
             painter.save()
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
             painter.setBrush(QBrush(QColor(0, 220, 255)))
             painter.setPen(QPen(QColor(255, 255, 255), 2.0))
             painter.drawEllipse(hover_pt, 5.5, 5.5)
@@ -1075,7 +1099,9 @@ class Canvas(QGraphicsScene):
 
     def contextMenuEvent(self, event: QGraphicsSceneContextMenuEvent) -> None:
         modifiers = event.modifiers() or QApplication.keyboardModifiers()
-        if bool(modifiers & (Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.MetaModifier)):
+        is_alt = bool(modifiers & (Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.MetaModifier))
+        if is_alt or getattr(self, '_suppress_context_menu_once', False):
+            self._suppress_context_menu_once = False
             event.accept()
             return
         super().contextMenuEvent(event)
@@ -1517,6 +1543,7 @@ class Canvas(QGraphicsScene):
                             event.accept()
                             return
                         elif btn == Qt.MouseButton.RightButton and hit_type == 'vertex':
+                            self._suppress_context_menu_once = True
                             shape = getattr(item.fontformat, 'shape_type', 'rect')
                             poly_pts = getattr(item.fontformat, 'polygon_points', None)
                             if shape == 'polygon' and poly_pts and len(poly_pts) > 3:
@@ -1639,9 +1666,41 @@ class Canvas(QGraphicsScene):
             self._polygon_drag_item = None
             self._polygon_drag_vertex_idx = -1
             self._polygon_drag_initial_pts = None
+
+            # Auto-expand bounding box if any vertex exceeded [0.0, 1.0]
+            lr = item.rect()
+            w, h = max(1.0, lr.width()), max(1.0, lr.height())
+            local_pts = [QPointF(p[0] * w, p[1] * h) for p in current_pts]
+            xs = [pt.x() for pt in local_pts]
+            ys = [pt.y() for pt in local_pts]
+            min_x, max_x = min(xs), max(xs)
+            min_y, max_y = min(ys), max(ys)
+            if min_x < -0.01 or max_x > w + 0.01 or min_y < -0.01 or max_y > h + 0.01:
+                exp_left = min(0.0, min_x)
+                exp_top = min(0.0, min_y)
+                exp_w = max(w, max_x) - exp_left
+                exp_h = max(h, max_y) - exp_top
+                new_scene_origin = item.mapToScene(QPointF(exp_left, exp_top))
+                renorm_pts = [[(pt.x() - exp_left) / exp_w, (pt.y() - exp_top) / exp_h] for pt in local_pts]
+                item.set_size(exp_w, exp_h)
+                item.set_logical_position(new_scene_origin)
+                item.fontformat.polygon_points = renorm_pts
+                item.blk.fontformat.polygon_points = renorm_pts
+                item.blk.polygon_points = renorm_pts
+                current_pts = renorm_pts
+
             if initial_pts is not None and initial_pts != current_pts:
                 from ballontranslator.ui.text_engine.editing.manager import ModifyPolygonPointsCommand
                 self.push_undo_command(ModifyPolygonPointsCommand(item, initial_pts, current_pts, getattr(self, 'st_manager', None)))
+            item.inline_format_changed.emit()
+            item.visual_geometry_changed.emit()
+            item.layout.reLayout()
+            item.update()
+            if self.txtblkShapeControl:
+                self.txtblkShapeControl.setBlkItem(item)
+                self.txtblkShapeControl.updateBoundingRect()
+                self.txtblkShapeControl.update()
+            self.update()
             event.accept()
             return
         if self._freehand_active and btn == Qt.MouseButton.LeftButton:
