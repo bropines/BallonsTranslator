@@ -985,7 +985,7 @@ class Canvas(QGraphicsScene):
         self.end_create_polygon_textblock.emit(rect, norm_pts)
         return True
 
-    def _find_polygon_vertex_or_edge_at(self, scene_pos: QPointF, tolerance_px: float = 20.0):
+    def _find_polygon_vertex_or_edge_at(self, scene_pos: QPointF, tolerance_px: float = 24.0):
         """Finds if scene_pos is near a vertex or edge of any polygon text item in scene coordinates."""
         candidates = list(self.selected_text_items())
         for itm in self.items(scene_pos):
@@ -1046,27 +1046,32 @@ class Canvas(QGraphicsScene):
             modifiers = QApplication.keyboardModifiers()
         is_alt = bool(modifiers & (Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.MetaModifier))
         if is_alt:
-            item, hit_type, hit_idx, hit_pt, norm_pt = self._find_polygon_vertex_or_edge_at(scene_pos, tolerance_px=22.0)
+            item, hit_type, hit_idx, hit_pt, norm_pt = self._find_polygon_vertex_or_edge_at(scene_pos, tolerance_px=24.0)
             if item is not None:
                 cursor = Qt.CursorShape.PointingHandCursor if hit_type == 'vertex' else Qt.CursorShape.CrossCursor
                 self.gv.viewport().setCursor(cursor)
-                if self.txtblkShapeControl:
-                    if self.txtblkShapeControl.blk_item is not item:
-                        self.txtblkShapeControl.setBlkItem(item)
-                    self.txtblkShapeControl.setCursor(cursor)
-                    self.txtblkShapeControl._hover_edge_pos = hit_pt
-                    self.txtblkShapeControl.update()
                 self._alt_hover_active = True
+                self._hover_indicator_scene_pos = hit_pt
+                self._hovered_polygon_target = (item, hit_type, hit_idx, hit_pt, norm_pt)
+                self.update()
                 return
 
         if getattr(self, '_alt_hover_active', False):
             self._alt_hover_active = False
+            self._hover_indicator_scene_pos = None
+            self._hovered_polygon_target = None
             self.gv.viewport().unsetCursor()
-            if self.txtblkShapeControl:
-                self.txtblkShapeControl.setCursor(Qt.CursorShape.SizeAllCursor)
-                if getattr(self.txtblkShapeControl, '_hover_edge_pos', None) is not None:
-                    self.txtblkShapeControl._hover_edge_pos = None
-                    self.txtblkShapeControl.update()
+            self.update()
+
+    def drawForeground(self, painter: QPainter, rect: QRectF) -> None:
+        super().drawForeground(painter, rect)
+        hover_pt = getattr(self, '_hover_indicator_scene_pos', None)
+        if hover_pt is not None and getattr(self, '_alt_hover_active', False):
+            painter.save()
+            painter.setBrush(QBrush(QColor(0, 220, 255)))
+            painter.setPen(QPen(QColor(255, 255, 255), 2.0))
+            painter.drawEllipse(hover_pt, 5.5, 5.5)
+            painter.restore()
 
     def contextMenuEvent(self, event: QGraphicsSceneContextMenuEvent) -> None:
         modifiers = event.modifiers() or QApplication.keyboardModifiers()
@@ -1293,11 +1298,13 @@ class Canvas(QGraphicsScene):
             if 0 <= idx < len(pts):
                 pts[idx] = [new_norm_x, new_norm_y]
                 item.fontformat.polygon_points = pts
+                item.blk.fontformat.polygon_points = pts
                 item.blk.polygon_points = pts
                 item.inline_format_changed.emit()
                 item.visual_geometry_changed.emit()
                 item.layout.reLayout()
                 item.update()
+                self.update()
                 if self.txtblkShapeControl:
                     self.txtblkShapeControl.updateBoundingRect()
                     self.txtblkShapeControl.update()
@@ -1462,8 +1469,13 @@ class Canvas(QGraphicsScene):
             if self.textEditMode():
                 modifiers = event.modifiers() or QApplication.keyboardModifiers()
                 is_alt = bool(modifiers & (Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.MetaModifier))
-                if is_alt:
-                    item, hit_type, hit_idx, hit_pt, norm_pt = self._find_polygon_vertex_or_edge_at(event.scenePos(), tolerance_px=20.0)
+                if is_alt or getattr(self, '_alt_hover_active', False):
+                    item, hit_type, hit_idx, hit_pt, norm_pt = self._find_polygon_vertex_or_edge_at(event.scenePos(), tolerance_px=24.0)
+                    if item is None and getattr(self, '_hovered_polygon_target', None) is not None:
+                        h_item, h_type, h_idx, h_pt, h_norm = self._hovered_polygon_target
+                        if (event.scenePos() - h_pt).manhattanLength() <= 35.0:
+                            item, hit_type, hit_idx, hit_pt, norm_pt = h_item, h_type, h_idx, h_pt, h_norm
+
                     if item is not None:
                         if btn == Qt.MouseButton.LeftButton:
                             shape = getattr(item.fontformat, 'shape_type', 'rect')
@@ -1482,6 +1494,7 @@ class Canvas(QGraphicsScene):
                             elif hit_type == 'edge':
                                 pts.insert(hit_idx + 1, norm_pt)
                                 item.fontformat.polygon_points = pts
+                                item.blk.fontformat.polygon_points = pts
                                 item.blk.polygon_points = pts
                                 self._polygon_drag_vertex_idx = hit_idx + 1
                                 item.inline_format_changed.emit()
@@ -1492,6 +1505,15 @@ class Canvas(QGraphicsScene):
                                     self.txtblkShapeControl.setBlkItem(item)
                                     self.txtblkShapeControl.updateBoundingRect()
                                     self.txtblkShapeControl.update()
+
+                            self.block_selection_signal = True
+                            for sel in self.selectedItems():
+                                if sel is not item:
+                                    sel.setSelected(False)
+                            item.setSelected(True)
+                            self.block_selection_signal = False
+
+                            self.update()
                             event.accept()
                             return
                         elif btn == Qt.MouseButton.RightButton and hit_type == 'vertex':
@@ -1502,6 +1524,7 @@ class Canvas(QGraphicsScene):
                                 old_pts = [list(p) for p in pts]
                                 pts.pop(hit_idx)
                                 item.fontformat.polygon_points = pts
+                                item.blk.fontformat.polygon_points = pts
                                 item.blk.polygon_points = pts
                                 item.inline_format_changed.emit()
                                 item.visual_geometry_changed.emit()
@@ -1512,6 +1535,7 @@ class Canvas(QGraphicsScene):
                                     self.txtblkShapeControl.update()
                                 from ballontranslator.ui.text_engine.editing.manager import ModifyPolygonPointsCommand
                                 self.push_undo_command(ModifyPolygonPointsCommand(item, old_pts, pts, getattr(self, 'st_manager', None)))
+                                self.update()
                                 event.accept()
                                 return
 
