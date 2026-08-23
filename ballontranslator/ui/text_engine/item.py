@@ -1183,7 +1183,7 @@ class TextBlkItem(QGraphicsTextItem):
         ):
             return
         selected = self.isSelected()
-        draw_rect = self.draw_rect and not self.under_ctrl
+        draw_rect = self.draw_rect
         if not selected and not draw_rect:
             return
         outline = self.geometry_controller.visual_outline_in_item()

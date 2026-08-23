@@ -1051,6 +1051,8 @@ class Canvas(QGraphicsScene):
                 cursor = Qt.CursorShape.PointingHandCursor if hit_type == 'vertex' else Qt.CursorShape.CrossCursor
                 self.gv.viewport().setCursor(cursor)
                 if self.txtblkShapeControl:
+                    if self.txtblkShapeControl.blk_item is not item:
+                        self.txtblkShapeControl.setBlkItem(item)
                     self.txtblkShapeControl.setCursor(cursor)
                     self.txtblkShapeControl._hover_edge_pos = hit_pt
                     self.txtblkShapeControl.update()

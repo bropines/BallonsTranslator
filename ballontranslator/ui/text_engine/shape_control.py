@@ -1004,11 +1004,18 @@ class TextBlkShapeControl(QGraphicsRectItem):
             else:
                 painter.drawRect(self.rect())
         else:
+            selected = self.blk_item is not None and self.blk_item.isSelected()
             if self.blk_item is not None and getattr(self.blk_item.fontformat, 'shape_type', 'rect') in ('polygon', 'ellipse'):
                 dim_pen = QPen(QColor(160, 160, 160, 100), 1.0, Qt.PenStyle.DashLine)
                 painter.setPen(dim_pen)
                 painter.drawRect(self.rect())
-            painter.setPen(self.pen())
+            pen = QPen(
+                QColor(248, 64, 147, 170) if selected else QColor(30, 147, 229, 170),
+                3.5 if selected else 3.0,
+                Qt.PenStyle.DashLine if selected else Qt.PenStyle.SolidLine,
+            )
+            pen.setCosmetic(True)
+            painter.setPen(pen)
             painter.drawPath(path)
             if self.blk_item is not None and getattr(self.blk_item.fontformat, 'shape_type', 'rect') == 'polygon':
                 poly_pts = getattr(self.blk_item.fontformat, 'polygon_points', None)
@@ -1021,11 +1028,11 @@ class TextBlkShapeControl(QGraphicsRectItem):
                         item_pt = QPointF(p[0] * w, p[1] * h)
                         ctrl_pt = self.mapFromItem(self.blk_item, item_pt)
                         painter.drawEllipse(ctrl_pt, 4.0, 4.0)
-                if getattr(self, '_hover_edge_pos', None) is not None:
-                    ctrl_hover = self.mapFromScene(self._hover_edge_pos)
-                    painter.setBrush(QBrush(QColor(0, 220, 255)))
-                    painter.setPen(QPen(QColor(255, 255, 255), 2.0))
-                    painter.drawEllipse(ctrl_hover, 5.0, 5.0)
+        if getattr(self, '_hover_edge_pos', None) is not None:
+            ctrl_hover = self.mapFromScene(self._hover_edge_pos)
+            painter.setBrush(QBrush(QColor(0, 220, 255)))
+            painter.setPen(QPen(QColor(255, 255, 255), 2.0))
+            painter.drawEllipse(ctrl_hover, 5.0, 5.0)
         painter.restore()
 
     def hideControls(self):
