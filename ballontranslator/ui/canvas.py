@@ -901,13 +901,92 @@ class Canvas(QGraphicsScene):
                 textblk_created = True
         return textblk_created
 
+    def _create_high_contrast_pen_cursor(self) -> QCursor:
+        size = 28
+        pix = QPixmap(size, size)
+        pix.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pix)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        # Nib geometry: tip at (3, 23), top-right at (23, 3)
+        path = QPainterPath()
+        path.moveTo(3, 23)
+        path.lineTo(6, 16)
+        path.lineTo(17, 5)
+        path.lineTo(23, 11)
+        path.lineTo(12, 22)
+        path.closeSubpath()
+
+        # 1. Outer Black Halo for pure-white / light backgrounds
+        p.setPen(QPen(QColor(0, 0, 0, 255), 3.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        p.setBrush(QBrush(QColor(0, 0, 0, 255)))
+        p.drawPath(path)
+
+        # 2. Crisp White Body for pure-black / dark backgrounds
+        p.setPen(QPen(QColor(255, 255, 255, 255), 1.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        p.setBrush(QBrush(QColor(255, 255, 255, 255)))
+        p.drawPath(path)
+
+        # 3. Inner Slit & Breather details
+        p.setPen(QPen(QColor(20, 20, 20, 255), 1.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.drawLine(QPointF(3, 23), QPointF(11, 15))
+        p.setBrush(QBrush(QColor(20, 20, 20, 255)))
+        p.drawEllipse(QPointF(11, 15), 1.4, 1.4)
+        p.drawLine(QPointF(14, 8), QPointF(20, 14))
+
+        # 4. Precision Hotspot Ring at tip (3, 23)
+        p.setPen(QPen(QColor(0, 0, 0, 255), 1.0))
+        p.setBrush(QBrush(QColor(0, 220, 255, 255)))
+        p.drawEllipse(QPointF(3, 23), 2.0, 2.0)
+
+        p.end()
+        return QCursor(pix, 3, 23)
+
+    def _create_high_contrast_lasso_cursor(self) -> QCursor:
+        size = 28
+        pix = QPixmap(size, size)
+        pix.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pix)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        # Lasso loop path
+        path = QPainterPath()
+        path.moveTo(4, 20)
+        path.cubicTo(1, 14, 5, 5, 14, 4)
+        path.cubicTo(23, 3, 26, 10, 22, 16)
+        path.cubicTo(18, 22, 9, 23, 4, 20)
+
+        # 1. Outer Black Halo
+        p.setPen(QPen(QColor(0, 0, 0, 255), 3.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.setBrush(QBrush(QColor(0, 0, 0, 50)))
+        p.drawPath(path)
+
+        # 2. Inner White Dash Line
+        p.setPen(QPen(QColor(255, 255, 255, 255), 1.8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.setBrush(QBrush(QColor(255, 255, 255, 90)))
+        p.drawPath(path)
+
+        # 3. Precision Crosshair at (4, 20)
+        p.setPen(QPen(QColor(0, 0, 0, 255), 2.5))
+        p.drawLine(QPointF(4, 16), QPointF(4, 24))
+        p.drawLine(QPointF(0, 20), QPointF(8, 20))
+
+        p.setPen(QPen(QColor(0, 220, 255, 255), 1.2))
+        p.drawLine(QPointF(4, 16), QPointF(4, 24))
+        p.drawLine(QPointF(0, 20), QPointF(8, 20))
+
+        p.end()
+        return QCursor(pix, 4, 20)
+
     def _get_tool_cursor(self, tool_mode: str) -> QCursor:
         if tool_mode == 'polygon_pen':
-            pix = QPixmap('resources/icons/tool_polygon_pen.svg').scaled(24, 24, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-            return QCursor(pix, 3, 21)
+            if not hasattr(self, '_cached_pen_cursor') or self._cached_pen_cursor is None:
+                self._cached_pen_cursor = self._create_high_contrast_pen_cursor()
+            return self._cached_pen_cursor
         elif tool_mode == 'freehand_lasso':
-            pix = QPixmap('resources/icons/tool_freehand.svg').scaled(24, 24, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-            return QCursor(pix, 3, 21)
+            if not hasattr(self, '_cached_lasso_cursor') or self._cached_lasso_cursor is None:
+                self._cached_lasso_cursor = self._create_high_contrast_lasso_cursor()
+            return self._cached_lasso_cursor
         return QCursor(Qt.CursorShape.CrossCursor)
 
     def _update_creation_cursor(self, shift_pressed: Optional[bool] = None) -> None:
