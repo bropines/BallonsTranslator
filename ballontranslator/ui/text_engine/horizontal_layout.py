@@ -51,17 +51,11 @@ def compute_polygon_scanline_span(pts: List[List[float]], y_val: float, avail_w:
     """Compute (x_left, width) for a horizontal scanline through a polygon."""
     if not pts or len(pts) < 3:
         return 0.0, avail_w
-    is_normalized = all(0.0 <= p[0] <= 1.05 and 0.0 <= p[1] <= 1.05 for p in pts)
-    if not is_normalized:
-        xs = [p[0] for p in pts]
-        ys = [p[1] for p in pts]
-        min_x, max_x = min(xs), max(xs)
-        min_y, max_y = min(ys), max(ys)
-        poly_w = max(1.0, max_x - min_x)
-        poly_h = max(1.0, max_y - min_y)
-        scaled_pts = [(((p[0] - min_x) / poly_w) * avail_w, ((p[1] - min_y) / poly_h) * avail_h) for p in pts]
-    else:
+    max_c = max(max(abs(p[0]), abs(p[1])) for p in pts)
+    if max_c <= 2.5:
         scaled_pts = [(p[0] * avail_w, p[1] * avail_h) for p in pts]
+    else:
+        scaled_pts = [(p[0], p[1]) for p in pts]
 
     x_intersections = []
     n = len(scaled_pts)

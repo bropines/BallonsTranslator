@@ -219,6 +219,18 @@ class TextItemGeometryController:
         rect.setSize(self.display_rect.size())
         source_paint_rect = self.source_paint_rect()
         rect = rect.united(source_paint_rect)
+        shape = getattr(self.item.fontformat, 'shape_type', 'rect')
+        poly_pts = getattr(self.item.fontformat, 'polygon_points', None)
+        if shape == 'polygon' and poly_pts and len(poly_pts) >= 3:
+            lr = self.logical_rect()
+            w, h = max(1.0, lr.width()), max(1.0, lr.height())
+            local_pts = [QPointF(p[0] * w, p[1] * h) for p in poly_pts]
+            xs = [pt.x() for pt in local_pts]
+            ys = [pt.y() for pt in local_pts]
+            poly_bounds = QRectF(min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys))
+            padding = self.item.padding()
+            poly_bounds = poly_bounds.adjusted(-padding - 20, -padding - 20, padding + 20, padding + 20)
+            rect = rect.united(poly_bounds)
         if self.visual_mapper is not None:
             rect = rect.united(
                 self.visual_mapper.visual_bounds(source_paint_rect)
@@ -299,16 +311,6 @@ class TextItemGeometryController:
         if shape == 'polygon' and poly_pts and len(poly_pts) >= 3:
             lr = self.logical_rect()
             w, h = max(1.0, lr.width()), max(1.0, lr.height())
-            is_norm = all(0.0 <= p[0] <= 1.05 and 0.0 <= p[1] <= 1.05 for p in poly_pts)
-            if not is_norm:
-                xs = [p[0] for p in poly_pts]
-                ys = [p[1] for p in poly_pts]
-                min_x, max_x = min(xs), max(xs)
-                min_y, max_y = min(ys), max(ys)
-                poly_w = max(1.0, max_x - min_x)
-                poly_h = max(1.0, max_y - min_y)
-                poly_pts = [[(p[0] - min_x) / poly_w, (p[1] - min_y) / poly_h] for p in poly_pts]
-
             p0 = QPointF(poly_pts[0][0] * w, poly_pts[0][1] * h)
             path.moveTo(p0)
             for pt in poly_pts[1:]:

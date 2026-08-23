@@ -1402,12 +1402,14 @@ class Canvas(QGraphicsScene):
             pts = [list(p) for p in item.fontformat.polygon_points]
             if 0 <= idx < len(pts):
                 pts[idx] = [new_norm_x, new_norm_y]
+                item.prepareGeometryChange()
                 item.fontformat.polygon_points = pts
                 item.blk.fontformat.polygon_points = pts
                 item.blk.polygon_points = pts
+                item.layout.reLayout()
+                item.repaint_background()
                 item.inline_format_changed.emit()
                 item.visual_geometry_changed.emit()
-                item.layout.reLayout()
                 item.update()
                 self.update()
                 if self.txtblkShapeControl:
@@ -1568,13 +1570,12 @@ class Canvas(QGraphicsScene):
         if btn == Qt.MouseButton.MiddleButton:
             self.mid_btn_pressed = True
             self.pan_initial_pos = event.screenPos()
-            return
-        
-        if self.imgtrans_proj.img_valid:
+
+        else:
             if self.textEditMode():
                 modifiers = event.modifiers() or QApplication.keyboardModifiers()
                 is_alt = bool(modifiers & (Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.MetaModifier))
-                if is_alt or getattr(self, '_alt_hover_active', False):
+                if is_alt:
                     item, hit_type, hit_idx, hit_pt, norm_pt = self._find_polygon_vertex_or_edge_at(event.scenePos(), tolerance_px=24.0)
                     if item is None and getattr(self, '_hovered_polygon_target', None) is not None:
                         h_item, h_type, h_idx, h_pt, h_norm = self._hovered_polygon_target
@@ -1598,13 +1599,15 @@ class Canvas(QGraphicsScene):
                                 self._polygon_drag_vertex_idx = hit_idx
                             elif hit_type == 'edge':
                                 pts.insert(hit_idx + 1, norm_pt)
+                                item.prepareGeometryChange()
                                 item.fontformat.polygon_points = pts
                                 item.blk.fontformat.polygon_points = pts
                                 item.blk.polygon_points = pts
                                 self._polygon_drag_vertex_idx = hit_idx + 1
+                                item.layout.reLayout()
+                                item.repaint_background()
                                 item.inline_format_changed.emit()
                                 item.visual_geometry_changed.emit()
-                                item.layout.reLayout()
                                 item.update()
                                 if self.txtblkShapeControl:
                                     self.txtblkShapeControl.setBlkItem(item)
@@ -1629,12 +1632,14 @@ class Canvas(QGraphicsScene):
                                 pts = [list(p) for p in poly_pts]
                                 old_pts = [list(p) for p in pts]
                                 pts.pop(hit_idx)
+                                item.prepareGeometryChange()
                                 item.fontformat.polygon_points = pts
                                 item.blk.fontformat.polygon_points = pts
                                 item.blk.polygon_points = pts
+                                item.layout.reLayout()
+                                item.repaint_background()
                                 item.inline_format_changed.emit()
                                 item.visual_geometry_changed.emit()
-                                item.layout.reLayout()
                                 item.update()
                                 if self.txtblkShapeControl:
                                     self.txtblkShapeControl.updateBoundingRect()
@@ -1746,34 +1751,15 @@ class Canvas(QGraphicsScene):
             self._polygon_drag_vertex_idx = -1
             self._polygon_drag_initial_pts = None
 
-            # Auto-expand bounding box if any vertex exceeded [0.0, 1.0]
-            lr = item.rect()
-            w, h = max(1.0, lr.width()), max(1.0, lr.height())
-            local_pts = [QPointF(p[0] * w, p[1] * h) for p in current_pts]
-            xs = [pt.x() for pt in local_pts]
-            ys = [pt.y() for pt in local_pts]
-            min_x, max_x = min(xs), max(xs)
-            min_y, max_y = min(ys), max(ys)
-            if min_x < -0.01 or max_x > w + 0.01 or min_y < -0.01 or max_y > h + 0.01:
-                exp_left = min(0.0, min_x)
-                exp_top = min(0.0, min_y)
-                exp_w = max(w, max_x) - exp_left
-                exp_h = max(h, max_y) - exp_top
-                new_scene_origin = item.mapToScene(QPointF(exp_left, exp_top))
-                renorm_pts = [[(pt.x() - exp_left) / exp_w, (pt.y() - exp_top) / exp_h] for pt in local_pts]
-                item.set_size(exp_w, exp_h)
-                item.set_logical_position(new_scene_origin)
-                item.fontformat.polygon_points = renorm_pts
-                item.blk.fontformat.polygon_points = renorm_pts
-                item.blk.polygon_points = renorm_pts
-                current_pts = renorm_pts
 
             if initial_pts is not None and initial_pts != current_pts:
                 from ballontranslator.ui.text_engine.editing.manager import ModifyPolygonPointsCommand
                 self.push_undo_command(ModifyPolygonPointsCommand(item, initial_pts, current_pts, getattr(self, 'st_manager', None)))
+            item.prepareGeometryChange()
+            item.layout.reLayout()
+            item.repaint_background()
             item.inline_format_changed.emit()
             item.visual_geometry_changed.emit()
-            item.layout.reLayout()
             item.update()
             if self.txtblkShapeControl:
                 self.txtblkShapeControl.setBlkItem(item)
