@@ -1312,6 +1312,10 @@ class TextBlkItem(QGraphicsTextItem):
         )
 
     def contextMenuEvent(self, event: QGraphicsSceneContextMenuEvent) -> None:
+        modifiers = event.modifiers() or QApplication.keyboardModifiers()
+        if bool(modifiers & (Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.MetaModifier)):
+            event.accept()
+            return
         if not self.isEditing():
             return super().contextMenuEvent(event)
         event.accept()

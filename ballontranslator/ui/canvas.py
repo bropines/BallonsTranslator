@@ -177,6 +177,13 @@ class CustomGV(QGraphicsView):
         self.hide_canvas.emit()
         return super().hideEvent(event)
 
+    def contextMenuEvent(self, event) -> None:
+        modifiers = event.modifiers() or QApplication.keyboardModifiers()
+        if bool(modifiers & (Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.MetaModifier)):
+            event.accept()
+            return
+        super().contextMenuEvent(event)
+
     def event(self, e: QEvent) -> bool:
         if isinstance(e, QNativeGestureEvent):
             if e.gestureType() == Qt.NativeGestureType.ZoomNativeGesture:
@@ -1058,6 +1065,13 @@ class Canvas(QGraphicsScene):
                 if getattr(self.txtblkShapeControl, '_hover_edge_pos', None) is not None:
                     self.txtblkShapeControl._hover_edge_pos = None
                     self.txtblkShapeControl.update()
+
+    def contextMenuEvent(self, event: QGraphicsSceneContextMenuEvent) -> None:
+        modifiers = event.modifiers() or QApplication.keyboardModifiers()
+        if bool(modifiers & (Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.MetaModifier)):
+            event.accept()
+            return
+        super().contextMenuEvent(event)
 
     @property
     def path_reorder_active(self) -> bool:
