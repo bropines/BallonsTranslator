@@ -119,9 +119,11 @@ class ModifyPolygonPointsCommand(QUndoCommand):
 
     def _apply_points(self, points):
         pts = [list(p) for p in points]
+        self.blk_item.fontformat.shape_type = 'polygon'
+        self.blk_item.blk.fontformat.shape_type = 'polygon'
         self.blk_item.fontformat.polygon_points = pts
         self.blk_item.blk.polygon_points = pts
-        self.blk_item.fontformat_changed.emit()
+        self.blk_item.inline_format_changed.emit()
         self.blk_item.visual_geometry_changed.emit()
         self.blk_item.layout.reLayout()
         self.blk_item.update()

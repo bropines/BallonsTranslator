@@ -995,24 +995,28 @@ class Canvas(QGraphicsScene):
         for item in candidates:
             shape = getattr(item.fontformat, 'shape_type', 'rect')
             poly_pts = getattr(item.fontformat, 'polygon_points', None)
-            if shape != 'polygon' or not poly_pts or len(poly_pts) < 3:
+            if shape == 'polygon' and poly_pts and len(poly_pts) >= 3:
+                pts = poly_pts
+            elif shape == 'rect':
+                pts = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]
+            else:
                 continue
 
             lr = item.rect()
             w, h = max(1.0, lr.width()), max(1.0, lr.height())
             
             # 1. Check vertices in SCENE coordinates
-            for idx, p in enumerate(poly_pts):
+            for idx, p in enumerate(pts):
                 v_scene = item.mapToScene(QPointF(p[0] * w, p[1] * h))
                 dist = (scene_pos - v_scene).manhattanLength()
                 if dist <= tolerance_px:
                     return item, 'vertex', idx, v_scene, [p[0], p[1]]
 
             # 2. Check edges in SCENE coordinates
-            n = len(poly_pts)
+            n = len(pts)
             for i in range(n):
-                p1_scene = item.mapToScene(QPointF(poly_pts[i][0] * w, poly_pts[i][1] * h))
-                p2_scene = item.mapToScene(QPointF(poly_pts[(i + 1) % n][0] * w, poly_pts[(i + 1) % n][1] * h))
+                p1_scene = item.mapToScene(QPointF(pts[i][0] * w, pts[i][1] * h))
+                p2_scene = item.mapToScene(QPointF(pts[(i + 1) % n][0] * w, pts[(i + 1) % n][1] * h))
                 edge_vec = p2_scene - p1_scene
                 edge_len_sq = edge_vec.x() ** 2 + edge_vec.y() ** 2
                 if edge_len_sq < 1e-6:
@@ -1274,7 +1278,7 @@ class Canvas(QGraphicsScene):
                 pts[idx] = [new_norm_x, new_norm_y]
                 item.fontformat.polygon_points = pts
                 item.blk.polygon_points = pts
-                item.fontformat_changed.emit()
+                item.inline_format_changed.emit()
                 item.visual_geometry_changed.emit()
                 item.layout.reLayout()
                 item.update()
@@ -1446,7 +1450,15 @@ class Canvas(QGraphicsScene):
                     item, hit_type, hit_idx, hit_pt, norm_pt = self._find_polygon_vertex_or_edge_at(event.scenePos(), tolerance_px=20.0)
                     if item is not None:
                         if btn == Qt.MouseButton.LeftButton:
-                            pts = [list(p) for p in item.fontformat.polygon_points]
+                            shape = getattr(item.fontformat, 'shape_type', 'rect')
+                            poly_pts = getattr(item.fontformat, 'polygon_points', None)
+                            if shape == 'polygon' and poly_pts and len(poly_pts) >= 3:
+                                pts = [list(p) for p in poly_pts]
+                            else:
+                                pts = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]
+                                item.fontformat.shape_type = 'polygon'
+                                item.blk.fontformat.shape_type = 'polygon'
+                            
                             self._polygon_drag_initial_pts = [list(p) for p in pts]
                             self._polygon_drag_item = item
                             if hit_type == 'vertex':
@@ -1456,23 +1468,26 @@ class Canvas(QGraphicsScene):
                                 item.fontformat.polygon_points = pts
                                 item.blk.polygon_points = pts
                                 self._polygon_drag_vertex_idx = hit_idx + 1
-                                item.fontformat_changed.emit()
+                                item.inline_format_changed.emit()
                                 item.visual_geometry_changed.emit()
                                 item.layout.reLayout()
                                 item.update()
                                 if self.txtblkShapeControl:
+                                    self.txtblkShapeControl.setBlkItem(item)
                                     self.txtblkShapeControl.updateBoundingRect()
                                     self.txtblkShapeControl.update()
                             event.accept()
                             return
                         elif btn == Qt.MouseButton.RightButton and hit_type == 'vertex':
-                            pts = [list(p) for p in item.fontformat.polygon_points]
-                            if len(pts) > 3:
+                            shape = getattr(item.fontformat, 'shape_type', 'rect')
+                            poly_pts = getattr(item.fontformat, 'polygon_points', None)
+                            if shape == 'polygon' and poly_pts and len(poly_pts) > 3:
+                                pts = [list(p) for p in poly_pts]
                                 old_pts = [list(p) for p in pts]
                                 pts.pop(hit_idx)
                                 item.fontformat.polygon_points = pts
                                 item.blk.polygon_points = pts
-                                item.fontformat_changed.emit()
+                                item.inline_format_changed.emit()
                                 item.visual_geometry_changed.emit()
                                 item.layout.reLayout()
                                 item.update()

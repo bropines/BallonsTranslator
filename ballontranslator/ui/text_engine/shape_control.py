@@ -968,6 +968,11 @@ class TextBlkShapeControl(QGraphicsRectItem):
             else:
                 painter.drawRect(self.rect())
         else:
+            if self.blk_item is not None and getattr(self.blk_item.fontformat, 'shape_type', 'rect') in ('polygon', 'ellipse'):
+                dim_pen = QPen(QColor(160, 160, 160, 100), 1.0, Qt.PenStyle.DashLine)
+                painter.setPen(dim_pen)
+                painter.drawRect(self.rect())
+            painter.setPen(self.pen())
             painter.drawPath(path)
             if self.blk_item is not None and getattr(self.blk_item.fontformat, 'shape_type', 'rect') == 'polygon':
                 poly_pts = getattr(self.blk_item.fontformat, 'polygon_points', None)
