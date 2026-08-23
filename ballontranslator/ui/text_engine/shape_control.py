@@ -462,6 +462,42 @@ class TextBlkShapeControl(QGraphicsRectItem):
         if self.blk_item is None:
             return
 
+        mapper = getattr(self.blk_item.geometry_controller, 'visual_mapper', None)
+        if mapper is None:
+            local_path = self.blk_item.geometry_controller.visual_outline_in_item()
+            local_bounds = self.blk_item.rect()
+            origin = self.blk_item.pos()
+            rotation = self.blk_item.rotation()
+            guard = device_pixels_to_local(
+                self, self.pen().widthF() / 2.0 + CONTROL_DEVICE_GUARD
+            )
+            outline_bounds = local_bounds.adjusted(-guard, -guard, guard, guard)
+            if (
+                self._visual_path == local_path
+                and self.pos() == origin
+                and self.rect() == local_bounds
+                and self._outline_bounds == outline_bounds
+                and self.rotation() == rotation
+            ):
+                self.updateControlBlocks()
+                return False
+
+            self._updating_bounds = True
+            try:
+                self.prepareGeometryChange()
+                self._visual_path = local_path
+                self._outline_bounds = outline_bounds
+                self._reported_angle = rotation
+                super().setTransform(QTransform(), False)
+                super().setRotation(rotation)
+                super().setPos(origin)
+                super().setRect(local_bounds)
+                self.updateControlBlocks()
+                self.update()
+            finally:
+                self._updating_bounds = False
+            return True
+
         scene_path = self.blk_item.geometry_controller.visual_outline_in_scene()
         parent = self.parentItem()
         if parent is None:
