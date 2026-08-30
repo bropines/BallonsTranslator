@@ -129,6 +129,15 @@ class RunPipelineDialogTests(unittest.TestCase):
             pcfg.module.llm_prior_context_token_budget,
             pcfg.module.llm_glossary_path,
             pcfg.module.llm_glossary_mode,
+            pcfg.module.llm_translate_vision,
+            pcfg.module.llm_translate_summary,
+            pcfg.module.llm_translate_memory,
+        )
+        self._llm_ocr_settings = (
+            pcfg.module.ocr,
+            pcfg.module.ocr_llm_page_level,
+            pcfg.module.ocr_llm_mask_non_text,
+            pcfg.module.ocr_llm_sort_reading_order,
         )
         self._visibility_states = (
             pcfg.show_textdetector_tool,
@@ -176,7 +185,16 @@ class RunPipelineDialogTests(unittest.TestCase):
             pcfg.module.llm_prior_context_token_budget,
             pcfg.module.llm_glossary_path,
             pcfg.module.llm_glossary_mode,
+            pcfg.module.llm_translate_vision,
+            pcfg.module.llm_translate_summary,
+            pcfg.module.llm_translate_memory,
         ) = self._pipeline_general_settings
+        (
+            pcfg.module.ocr,
+            pcfg.module.ocr_llm_page_level,
+            pcfg.module.ocr_llm_mask_non_text,
+            pcfg.module.ocr_llm_sort_reading_order,
+        ) = self._llm_ocr_settings
         self._save_config_patcher.stop()
 
     def test_ocr_text_postprocess_radio_buttons_update_module_config(self):
@@ -651,6 +669,34 @@ class RunPipelineDialogTests(unittest.TestCase):
         self.assertFalse(hasattr(dialog, 'show_MT_keyword_window'))
         dialog.close()
 
+    def test_llm_ocr_run_settings_are_conditional_and_persistent(self):
+        pcfg.module.ocr = 'LLMOCR'
+        pcfg.module.ocr_llm_page_level = False
+        pcfg.module.ocr_llm_mask_non_text = True
+        pcfg.module.ocr_llm_sort_reading_order = False
+        dialog = RunPipelineDialog()
+
+        self.assertFalse(dialog.llm_ocr_settings.isHidden())
+        self.assertFalse(dialog.llm_ocr_mask_non_text.isEnabled())
+        self.assertFalse(dialog.llm_ocr_reading_order.isEnabled())
+
+        dialog.llm_ocr_page_level.click()
+        self.assertTrue(pcfg.module.ocr_llm_page_level)
+        self.assertTrue(dialog.llm_ocr_mask_non_text.isEnabled())
+        self.assertTrue(dialog.llm_ocr_reading_order.isEnabled())
+        dialog.llm_ocr_mask_non_text.click()
+        dialog.llm_ocr_reading_order.click()
+        self.assertFalse(pcfg.module.ocr_llm_mask_non_text)
+        self.assertTrue(pcfg.module.ocr_llm_sort_reading_order)
+
+        dialog.setModuleSelection('ocr', 'mit48px')
+        self.assertTrue(dialog.llm_ocr_settings.isHidden())
+        dialog.setModuleSelection('ocr', 'LLMOCR')
+        self.assertFalse(dialog.llm_ocr_settings.isHidden())
+        self.assertFalse(dialog.llm_ocr_mask_non_text.isChecked())
+        self.assertTrue(dialog.llm_ocr_reading_order.isChecked())
+        dialog.close()
+
     def test_llm_context_and_glossary_controls_persist_disabled_values(self):
         pcfg.module.llm_translate_context = LLMTranslateContext.PAGE
         pcfg.module.llm_prior_context_token_budget = 8192
@@ -704,6 +750,38 @@ class RunPipelineDialogTests(unittest.TestCase):
         self.assertEqual(dialog.prior_context_token_budget.value(), 16384)
         self.assertTrue(dialog.history_budget_row.isHidden())
         self.assertTrue(dialog.glossary_mode_combobox.isEnabled())
+        dialog.close()
+
+    def test_llm_context_controls_are_independent(self):
+        pcfg.module.llm_translate_context = LLMTranslateContext.PAGE
+        pcfg.module.llm_translate_vision = False
+        pcfg.module.llm_translate_summary = False
+        pcfg.module.llm_translate_memory = False
+        dialog = RunPipelineDialog(
+            translator_metadata={'name': 'LLMTranslator'},
+        )
+
+        self.assertFalse(dialog.llm_features_row.isHidden())
+        self.assertTrue(dialog.llm_summary_checkbox.isEnabled())
+        self.assertTrue(dialog.llm_memory_checkbox.isEnabled())
+
+        dialog.llm_summary_checkbox.setChecked(True)
+        dialog.llm_memory_checkbox.setChecked(True)
+        self.assertTrue(pcfg.module.llm_translate_summary)
+        self.assertTrue(pcfg.module.llm_translate_memory)
+
+        history_index = dialog.llm_context_combobox.findData(
+            LLMTranslateContext.HISTORY
+        )
+        dialog.llm_context_combobox.setCurrentIndex(history_index)
+        self.assertTrue(dialog.llm_memory_checkbox.isEnabled())
+
+        dialog.llm_vision_checkbox.setChecked(True)
+        dialog.llm_vision_checkbox.setChecked(False)
+        self.assertTrue(dialog.llm_summary_checkbox.isChecked())
+        self.assertTrue(dialog.llm_memory_checkbox.isChecked())
+        self.assertTrue(pcfg.module.llm_translate_summary)
+        self.assertTrue(pcfg.module.llm_translate_memory)
         dialog.close()
 
     def test_copy_source_glossary_error_preserves_clipboard(self):
@@ -1443,6 +1521,7 @@ class RunPipelineDialogTests(unittest.TestCase):
         )
         owner = SimpleNamespace(
             imgtrans_proj=project,
+            llmContextEditor=SimpleNamespace(refresh=Mock()),
             backup_blkstyles=[],
             _run_imgtrans_wo_textstyle_update=False,
             _render_only=True,
@@ -1536,6 +1615,7 @@ class RunPipelineDialogTests(unittest.TestCase):
         )
         owner = SimpleNamespace(
             imgtrans_proj=project,
+            llmContextEditor=SimpleNamespace(refresh=Mock()),
             backup_blkstyles=[],
             _run_imgtrans_wo_textstyle_update=False,
             _render_only=False,
@@ -1786,6 +1866,7 @@ class RunPipelineDialogTests(unittest.TestCase):
         )
         owner = SimpleNamespace(
             imgtrans_proj=project,
+            llmContextEditor=SimpleNamespace(refresh=Mock()),
             backup_blkstyles=[],
             _run_imgtrans_wo_textstyle_update=False,
             _render_only=False,
@@ -1878,6 +1959,7 @@ class RunPipelineDialogTests(unittest.TestCase):
         )
         owner = SimpleNamespace(
             imgtrans_proj=project,
+            llmContextEditor=SimpleNamespace(refresh=Mock()),
             backup_blkstyles=[],
             _run_imgtrans_wo_textstyle_update=False,
             _render_only=False,

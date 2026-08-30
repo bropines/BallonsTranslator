@@ -42,7 +42,7 @@ from .custom_widget import ImgtransProgressMessageBox, ParamComboBox, ProgressMe
 from .configpanel import ConfigPanel
 from ballontranslator.utils.proj_imgtrans import ProjImgTrans
 from ballontranslator.utils.config import pcfg, RunStatus, save_config
-from ballontranslator.utils.llm_profiles import LLM_INPAINT_KEY
+from ballontranslator.utils.llm_profiles import LLM_INPAINT_KEY, LLM_OCR_KEY
 from ballontranslator.utils.global_callbacks import register_global_callback
 cfg_module = pcfg.module
 
@@ -116,6 +116,18 @@ def _reset_llm_key_required_dialogs():
         _shown_llm_model_dialog_profiles.clear()
     with _llm_base_url_dialog_lock:
         _shown_llm_base_url_dialog_profiles.clear()
+
+
+def _mark_translation_finished(
+    project: ProjImgTrans,
+    page_key: str,
+    translator: BaseTranslator,
+) -> None:
+    """Mark completion, then let the owning translator commit page context."""
+    project.mark_translation_finished(page_key, translator.lang_target)
+    finished_hook = getattr(translator, 'on_page_translation_finished', None)
+    if callable(finished_hook):
+        finished_hook(project, page_key)
 
 
 class ModuleThread(QThread):
@@ -624,7 +636,7 @@ class TranslateThread(ModuleThread):
                 self.tr('Page'),
             )
         if success:
-            project.mark_translation_finished(page_key, self.translator.lang_target)
+            _mark_translation_finished(project, page_key, self.translator)
         return success
 
     def push_pagekey_queue(self, page_key: str):
@@ -865,10 +877,7 @@ class ImgtransThread(QThread):
             full_page=True,
         )
         if success:
-            project.mark_translation_finished(
-                page_key,
-                self.translator.lang_target,
-            )
+            _mark_translation_finished(project, page_key, self.translator)
         return success
 
     def _blktrans_pipeline(
@@ -938,9 +947,10 @@ class ImgtransThread(QThread):
                     or bool(str(getattr(block, 'translation', '') or '').strip())
                     for block in page
                 ):
-                    self.imgtrans_proj.mark_translation_finished(
+                    _mark_translation_finished(
+                        self.imgtrans_proj,
                         page_key,
-                        self.translator.lang_target,
+                        self.translator,
                     )
             self.finish_blktrans.emit(mode, blk_ids)
         if mode > 1:
@@ -1084,7 +1094,19 @@ class ImgtransThread(QThread):
                 if hasattr(self.ocr, 'set_stop_event'):
                     self.ocr.set_stop_event(self.stop_event)
                 try:
-                    self.ocr.run_ocr(img, blk_list)
+                    # full_page is an LLMOCR-only extension; preserve the
+                    # historical two-argument contract for custom OCR modules.
+                    if getattr(self.ocr, 'name', '') == LLM_OCR_KEY:
+                        ocr_result = self.ocr.run_ocr(
+                            img,
+                            blk_list,
+                            full_page=True,
+                        )
+                    else:
+                        ocr_result = self.ocr.run_ocr(img, blk_list)
+                    if isinstance(ocr_result, list):
+                        blk_list = ocr_result
+                    self.imgtrans_proj.pages[imgname] = blk_list
                     self.ocr_counter += 1
 
                     if pcfg.restore_ocr_empty:

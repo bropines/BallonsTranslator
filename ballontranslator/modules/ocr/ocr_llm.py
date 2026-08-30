@@ -1,35 +1,40 @@
 import base64
 import json
-import re
-import time
-from typing import Dict, List
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
 
-from ..context.errors import provider_error_message
+from ..llm_chat import LLMChatRequester, openai_chat_completion_args
 from .base import OCRBase, register_OCR
 from ballontranslator.modules.exceptions import LLMApiKeyRequiredError, LLMModelRequiredError, LLMRequestStopped
 from ballontranslator.utils.config import pcfg
 from ballontranslator.utils.llm_profiles import (
+    DEFAULT_OCR_PROMPT,
     LLMProfile,
-    openai_chat_completion_args,
     profile_by_id,
     profile_from_config,
-    resolve_api_key,
 )
 from ballontranslator.utils.textblock import TextBlock
 
 
 def create_annotated_page(
     img: np.ndarray,
-    blk_list: List[TextBlock],
-    box_color: tuple = (0, 0, 255),
-    font_scale: float = 1.2,
-    thickness: int = 3,
-    censored: bool = True
+    blk_list: Sequence[TextBlock],
+    mask_non_text: bool = True,
 ) -> np.ndarray:
-    if censored:
+    """Return a page annotated with stable, one-based block identifiers.
+
+    >>> image = np.full((4, 4, 3), 255, dtype=np.uint8)
+    >>> int(create_annotated_page(image, [], mask_non_text=True).sum())
+    0
+    """
+
+    # Preserve the former default "0, 0, 255" RGB label color in OpenCV BGR.
+    box_color = (255, 0, 0)
+    font_scale = 1.2
+    thickness = 3
+    if mask_non_text:
         annotated = np.zeros_like(img)
         im_h, im_w = img.shape[:2]
         for blk in blk_list:
@@ -60,10 +65,14 @@ DEFAULT_OCR_SYSTEM_PROMPT = (
     "You are an OCR engine for comic and manga image crops. Your job is to recognize visible text only. "
     "Return raw recognized text and nothing else."
 )
+PAGE_OCR_SYSTEM_PROMPT = (
+    "You are a precise comic and manga OCR engine. Follow the fixed JSON response "
+    "contract exactly and do not return markdown or explanations."
+)
 
 
 @register_OCR("LLMOCR")
-class LLMOCR(OCRBase):
+class LLMOCR(LLMChatRequester, OCRBase):
     """Profile-backed OCR using OpenAI-compatible vision chat models.
 
     Example:
@@ -72,7 +81,6 @@ class LLMOCR(OCRBase):
     """
 
     dependencies = ['openai>=2.8.1', 'httpx[socks,brotli]']
-    dummy_api_key = 'dummy-key'
 
     params: Dict = {
         "max requests per minute": {
@@ -100,55 +108,13 @@ class LLMOCR(OCRBase):
             "display_name": "Proxy",
             "description": "Proxy address used for the OpenAI-compatible client.",
         },
-        "page_level_ocr": {
-            "value": True,
-            "type": "checkbox",
-            "display_name": "Page-Level OCR",
-            "description": "Process the entire page in a single request with numbered boxes instead of cropped slices.",
-        },
-        "censorship": {
-            "value": True,
-            "type": "checkbox",
-            "display_name": "Censorship (Blackout Image)",
-            "description": "Black out all non-text areas of the page image before sending it to the Vision LLM.",
-        },
-        "sort_by_llm": {
-            "value": True,
-            "type": "checkbox",
-            "display_name": "Sort Reading Order",
-            "description": "Re-order text blocks according to the reading flow determined by the Vision LLM.",
-        },
-        "font_scale": {
-            "value": 1.2,
-            "type": "line_editor",
-            "display_name": "Label Font Scale",
-            "description": "Font size scale for block number labels on the page image.",
-        },
-        "box_color": {
-            "value": "0, 0, 255",
-            "type": "line_editor",
-            "display_name": "Box Color (RGB)",
-            "description": "Box border color in RGB (e.g. '0, 0, 255').",
-        },
-        "custom_prompt": {
-            "value": "",
-            "type": "line_editor",
-            "display_name": "Custom OCR Prompt",
-            "description": "Additional custom instructions appended to the OCR prompt.",
-        },
         "description": "OCR using the selected vision-capable LLM profile.",
     }
 
     def __init__(self, **params) -> None:
         super().__init__(**params)
-        self.client = None
-        self.client_cache_key = None
         self.token_count = 0
         self.token_count_last = 0
-        self.last_request_time = 0
-        self.request_count_minute = 0
-        self.minute_start_time = time.time()
-        self.stop_event = None
 
     @property
     def profile(self) -> LLMProfile:
@@ -171,100 +137,18 @@ class LLMOCR(OCRBase):
             raise LLMModelRequiredError(profile.id, profile.name, target='vision_model')
         return model
 
-    def set_stop_event(self, stop_event):
-        self.stop_event = stop_event
-
-    def _wait(self, seconds: float):
-        if seconds <= 0:
-            return
-        if self.stop_event is not None:
-            if self.stop_event.wait(seconds):
-                raise LLMRequestStopped()
-            return
-        time.sleep(seconds)
-
-    def _openai_module(self):
-        import openai  # type: ignore
-
-        return openai
-
-    def _http_client(self, proxy: str):
-        import httpx  # type: ignore
-
-        if not proxy:
-            return httpx.Client()
-        try:
-            mounts = {
-                "http://": httpx.HTTPTransport(proxy=proxy),
-                "https://": httpx.HTTPTransport(proxy=proxy),
-            }
-            return httpx.Client(mounts=mounts)
-        except Exception as e:
-            self.logger.error(f"Failed to initialize proxy '{proxy}': {e}. Proceeding without proxy.")
-            return httpx.Client()
-
-    def _api_key_for_profile(self, profile: LLMProfile) -> str:
-        api_key = resolve_api_key(profile).strip()
-        if profile.require_api_key and not api_key:
-            raise LLMApiKeyRequiredError(profile.id, profile.name)
-        return api_key
-
-    def _client_api_key_for_profile(self, profile: LLMProfile) -> str:
-        api_key = self._api_key_for_profile(profile)
-        if not api_key:
-            self.logger.debug(
-                f'LLM profile "{profile.name or profile.id}" does not require an API key; '
-                'using a dummy API key for OpenAI-compatible client initialization.'
-            )
-            return self.dummy_api_key
-        return api_key
-
-    def _initialize_client(self, profile: LLMProfile):
-        api_key = self._client_api_key_for_profile(profile)
-        base_url = profile.base_url or None
-        proxy = self.get_param_value('proxy') or ''
-        cache_key = (api_key, base_url, proxy)
-        if self.client is not None and self.client_cache_key == cache_key:
-            return self.client
-
-        openai = self._openai_module()
-        self.client = openai.OpenAI(
-            api_key=api_key,
-            base_url=base_url,
-            http_client=self._http_client(proxy),
-        )
-        self.client_cache_key = cache_key
-        return self.client
-
-    def _respect_delay(self):
-        current_time = time.time()
-        rpm = self.get_param_value('max requests per minute')
-        delay = self.get_param_value('delay')
-        if rpm > 0:
-            if current_time - self.minute_start_time >= 60:
-                self.request_count_minute = 0
-                self.minute_start_time = current_time
-            if self.request_count_minute >= rpm:
-                wait_time = 60.1 - (current_time - self.minute_start_time)
-                if wait_time > 0:
-                    self.logger.warning(f"Global RPM limit ({rpm}) reached. Waiting {wait_time:.2f} seconds.")
-                    self._wait(wait_time)
-                self.request_count_minute = 0
-                self.minute_start_time = time.time()
-
-        time_since_last_request = current_time - self.last_request_time
-        if time_since_last_request < delay:
-            self._wait(delay - time_since_last_request)
-
-        self.last_request_time = time.time()
-        self.request_count_minute += 1
-
     @staticmethod
     def _normalized_text(text: str) -> str:
         return ' '.join(str(text or '').replace('\r', '\n').split()).strip()
 
     def _image_content_part(self, img: np.ndarray, profile: LLMProfile) -> Dict:
-        success, buffer = cv2.imencode(".jpg", img)
+        # Project images use RGB/RGBA; OpenCV encoders expect BGR/BGRA.
+        encoded_img = img
+        if img.ndim == 3 and img.shape[-1] == 3:
+            encoded_img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+        elif img.ndim == 3 and img.shape[-1] == 4:
+            encoded_img = cv2.cvtColor(img, cv2.COLOR_RGBA2BGRA)
+        success, buffer = cv2.imencode(".jpg", encoded_img)
         if not success:
             raise RuntimeError('Failed to encode OCR image.')
         img_base64 = base64.b64encode(buffer).decode("utf-8")
@@ -277,7 +161,12 @@ class LLMOCR(OCRBase):
             image_content_part["image_url"]["detail"] = detail_level
         return image_content_part
 
-    def _messages(self, img: np.ndarray, profile: LLMProfile, prompt: str = None) -> List[Dict]:
+    def _messages(
+        self,
+        img: np.ndarray,
+        profile: LLMProfile,
+        prompt: Optional[str] = None,
+    ) -> List[Dict]:
         return [
             {"role": "system", "content": DEFAULT_OCR_SYSTEM_PROMPT},
             {
@@ -289,237 +178,298 @@ class LLMOCR(OCRBase):
             },
         ]
 
-    def _api_args(self, profile: LLMProfile, messages: List[Dict]):
+    @staticmethod
+    def _page_response_schema(
+        expected_count: int,
+        sort_reading_order: bool,
+    ) -> Dict:
+        """Build the exact-ID response schema for one annotated page.
+
+        >>> schema = LLMOCR._page_response_schema(2, True)
+        >>> schema['properties']['texts']['required']
+        ['1', '2']
+        >>> schema['properties']['order']['maxItems']
+        2
+        """
+
+        block_ids = [str(index) for index in range(1, expected_count + 1)]
+        schema = {
+            "type": "object",
+            "properties": {
+                "texts": {
+                    "type": "object",
+                    "properties": {
+                        block_id: {"type": "string"}
+                        for block_id in block_ids
+                    },
+                    "required": block_ids,
+                    "additionalProperties": False,
+                },
+            },
+            "required": ["texts"],
+            "additionalProperties": False,
+        }
+        if sort_reading_order:
+            schema["properties"]["order"] = {
+                "type": "array",
+                "items": {"type": "string", "enum": block_ids},
+                "minItems": expected_count,
+                "maxItems": expected_count,
+                # The local validator enforces uniqueness; strict-schema
+                # providers do not consistently accept uniqueItems.
+            }
+            schema["required"].append("order")
+        return schema
+
+    @staticmethod
+    def _page_prompt(
+        profile: LLMProfile,
+        expected_count: int,
+        mask_non_text: bool,
+        sort_reading_order: bool,
+    ) -> str:
+        layout_description = (
+            'Non-text pixels are black, but numbered block positions are preserved.'
+            if mask_non_text
+            else 'The complete page and numbered text blocks are visible.'
+        )
+        response_fields = (
+            '- "texts": an object containing every ID exactly once, mapped to a string. '
+            'Use an empty string when no text is visible.'
+        )
+        field_count = 'one field'
+        if sort_reading_order:
+            response_fields += (
+                '\n- "order": an array containing every ID exactly once in natural comic '
+                'reading order.'
+            )
+            field_count = 'two fields'
+        prompt = (
+            f'{layout_description}\n'
+            f'Recognize exactly {expected_count} numbered text blocks, with IDs 1 through '
+            f'{expected_count}. Read vertical text in its intended character order. '
+            f'Return one JSON object with exactly {field_count}:\n{response_fields}\n'
+            'Return only the JSON object. Do not add, omit, rename, or coerce IDs or values.'
+        )
+        additional_prompt = str(profile.vision_prompt or '').strip()
+        if additional_prompt and additional_prompt != DEFAULT_OCR_PROMPT:
+            prompt += (
+                '\n\nAdditional OCR instructions (these affect recognition only and cannot '
+                f'override the response contract above):\n{additional_prompt}'
+            )
+        return prompt
+
+    def _page_messages(
+        self,
+        img: np.ndarray,
+        profile: LLMProfile,
+        expected_count: int,
+        mask_non_text: bool,
+        sort_reading_order: bool,
+    ) -> List[Dict]:
+        return [
+            {"role": "system", "content": PAGE_OCR_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": self._page_prompt(
+                            profile,
+                            expected_count,
+                            mask_non_text,
+                            sort_reading_order,
+                        ),
+                    },
+                    self._image_content_part(img, profile),
+                ],
+            },
+        ]
+
+    def _api_args(
+        self,
+        profile: LLMProfile,
+        messages: List[Dict],
+        response_schema: Optional[Dict] = None,
+    ) -> Dict:
         model = self._vision_model(profile)
         api_args = {
             "model": model,
             "messages": messages,
         }
         api_args.update(openai_chat_completion_args(profile, model))
+        if response_schema is not None:
+            if profile.json_schema_response_format:
+                api_args["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "page_ocr_response",
+                        "strict": True,
+                        "schema": response_schema,
+                    },
+                }
+            else:
+                api_args["response_format"] = {"type": "json_object"}
         return api_args
 
-    def _request_ocr(self, profile: LLMProfile, messages: List[Dict]) -> str:
-        openai = self._openai_module()
-        client = self._initialize_client(profile)
-        self._respect_delay()
-        try:
-            completion = client.chat.completions.create(**self._api_args(profile, messages))
-        except getattr(openai, 'AuthenticationError') as e:
-            raise LLMApiKeyRequiredError(profile.id, profile.name) from e
-        except getattr(openai, 'APIStatusError') as e:
-            raise RuntimeError(provider_error_message(e)) from e
-
-        if getattr(completion, 'usage', None) is not None:
-            self.token_count += completion.usage.total_tokens
-            self.token_count_last = completion.usage.total_tokens
+    def _request_ocr(
+        self,
+        profile: LLMProfile,
+        messages: List[Dict],
+        response_schema: Optional[Dict] = None,
+    ) -> str:
+        result = self.request_chat_completion(
+            profile,
+            self._api_args(profile, messages, response_schema),
+        )
+        if result.usage is not None:
+            self.token_count += result.usage.total_tokens
+            self.token_count_last = result.usage.total_tokens
         else:
             self.token_count_last = 0
+        return result.content
 
-        for choice in completion.choices:
-            message = getattr(choice, 'message', None)
-            content = getattr(message, 'content', None)
-            if content is not None:
-                return str(content)
-            if hasattr(choice, 'text') and choice.text is not None:
-                return str(choice.text)
-        return ''
-
-    @property
-    def page_level_ocr(self) -> bool:
-        return bool(self.get_param_value('page_level_ocr'))
-
-    @property
-    def censorship(self) -> bool:
-        return bool(self.get_param_value('censorship'))
-
-    @property
-    def sort_by_llm(self) -> bool:
-        return bool(self.get_param_value('sort_by_llm'))
-
-    @property
-    def font_scale(self) -> float:
-        try:
-            return float(self.get_param_value('font_scale'))
-        except (ValueError, TypeError):
-            return 1.2
-
-    @property
-    def box_color_bgr(self) -> tuple:
-        raw = str(self.get_param_value('box_color') or '0, 0, 255')
-        try:
-            parts = [int(p.strip()) for p in raw.split(',')]
-            if len(parts) == 3:
-                r, g, b = parts
-                return (b, g, r)
-        except Exception:
-            pass
-        return (255, 0, 0)
-
-    @property
-    def custom_prompt_override(self) -> str:
-        return str(self.get_param_value('custom_prompt') or '').strip()
-
-    def ocr_img(self, img: np.ndarray, *, prompt: str = None, **kwargs) -> str:
-        profile = self.profile
-        messages = self._messages(img, profile, prompt=prompt)
+    def _request_with_retries(
+        self,
+        profile: LLMProfile,
+        messages: List[Dict],
+        *,
+        failure_label: str,
+        response_schema: Optional[Dict] = None,
+    ) -> str:
         retry_attempt = 0
         while True:
             if self.stop_event is not None and self.stop_event.is_set():
                 raise LLMRequestStopped()
             try:
-                result = self._normalized_text(self._request_ocr(profile, messages))
+                result = self._request_ocr(profile, messages, response_schema)
                 if self.token_count_last:
                     self.logger.info(f'Used {self.token_count_last} tokens (Total: {self.token_count})')
-                return result
-            except LLMApiKeyRequiredError:
-                raise
-            except LLMModelRequiredError:
-                raise
-            except LLMRequestStopped:
-                raise
-            except Exception as e:
-                retry_attempt += 1
-                if retry_attempt >= self.get_param_value('retry attempts'):
-                    raise RuntimeError(f'LLM OCR failed: {e}') from e
-                self.logger.warning(f"LLM OCR failed due to {e}. Attempt: {retry_attempt}")
-                self._wait(self.get_param_value('retry timeout'))
-
-    def _ocr_blk_list(self, img: np.ndarray, blk_list: List[TextBlock], *args, **kwargs) -> None:
-        if not self.page_level_ocr or not blk_list:
-            return super()._ocr_blk_list(img, blk_list, *args, **kwargs)
-
-        self.logger.info(f"Performing Page-level LLM OCR on {len(blk_list)} blocks...")
-        annotated_img = create_annotated_page(
-            img,
-            blk_list,
-            box_color=self.box_color_bgr,
-            font_scale=self.font_scale,
-            thickness=3,
-            censored=self.censorship
-        )
-
-        custom_p = self.custom_prompt_override
-        img_layout_desc = "all non-text areas are blacked out for safety" if self.censorship else "the full page layout is visible"
-        prompt = (
-            f"The input image is a page from a comic/manga where {img_layout_desc}. "
-            f"There are {len(blk_list)} text blocks labeled with colored boxes and numbers from 1 to {len(blk_list)}.\n\n"
-            "Your task is to perform OCR on each block individually and return the exact text for each block number.\n"
-            "CRITICAL: Analyze the visual panel layout and flow of speech bubbles on the page to determine the correct reading order (typically right-to-left, top-to-bottom for Japanese manga). "
-            "Sort the keys in the returned JSON object in this correct reading order so they follow the natural flow of the story.\n\n"
-        )
-        if custom_p:
-            prompt += f"Apply these additional OCR instructions: {custom_p}\n\n"
-        prompt += (
-            "Return ONLY a valid JSON object mapping block numbers to their text. "
-            "For example:\n"
-            "{\n"
-            '  "1": "First block text",\n'
-            '  "2": "Second block text"\n'
-            "}\n\n"
-            "Do not include any explanation, code blocks, or markdown formatting in your response. "
-            "If a block is completely empty or contains no text, map it to an empty string."
-        )
-
-        try:
-            raw_response = self._request_page_ocr(annotated_img, prompt)
-            parsed_results = self._parse_page_ocr_response(raw_response, len(blk_list))
-
-            # Set text for all blocks and fall back for missing ones
-            for i, blk in enumerate(blk_list):
-                blk_num_str = str(i + 1)
-                if blk_num_str in parsed_results:
-                    blk.text = parsed_results[blk_num_str]
-                else:
-                    self.logger.warning(f"Block #{blk_num_str} text was missing in response. Falling back to crop OCR.")
-                    self._ocr_single_block_fallback(img, blk)
-
-            # Re-order the blocks list in-place based on the reading order determined by the LLM
-            if self.sort_by_llm:
-                ordered_blks = []
-                seen_indices = set()
-                for blk_num_str in parsed_results.keys():
-                    try:
-                        idx = int(blk_num_str) - 1
-                        if 0 <= idx < len(blk_list) and idx not in seen_indices:
-                            ordered_blks.append(blk_list[idx])
-                            seen_indices.add(idx)
-                    except ValueError:
-                        continue
-                # Append any blocks that were not returned by the LLM
-                for idx, blk in enumerate(blk_list):
-                    if idx not in seen_indices:
-                        ordered_blks.append(blk)
-
-                blk_list[:] = ordered_blks
-                self.logger.info("Page-level OCR: Re-ordered text blocks based on LLM reading order flow.")
-
-        except Exception as e:
-            self.logger.error(f"Page-level LLM OCR failed: {e}. Falling back to block-by-block OCR.")
-            return super()._ocr_blk_list(img, blk_list, *args, **kwargs)
-
-    def _request_page_ocr(self, img: np.ndarray, prompt: str) -> str:
-        profile = self.profile
-        messages = [
-            {"role": "system", "content": "You are a precise comic/manga OCR assistant. You output raw text in a JSON mapping format."},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    self._image_content_part(img, profile),
-                ],
-            },
-        ]
-
-        retry_attempt = 0
-        while True:
-            if self.stop_event is not None and self.stop_event.is_set():
-                raise LLMRequestStopped()
-            try:
-                result = self._request_ocr(profile, messages)
                 return result
             except (LLMApiKeyRequiredError, LLMModelRequiredError, LLMRequestStopped):
                 raise
             except Exception as e:
                 retry_attempt += 1
                 if retry_attempt >= self.get_param_value('retry attempts'):
-                    raise RuntimeError(f'Page-level LLM OCR request failed: {e}') from e
-                self.logger.warning(f"Page-level LLM OCR request failed: {e}. Attempt: {retry_attempt}")
+                    raise RuntimeError(f'{failure_label} failed: {e}') from e
+                self.logger.warning(
+                    f'{failure_label} failed due to {e}. Attempt: {retry_attempt}'
+                )
                 self._wait(self.get_param_value('retry timeout'))
 
-    def _parse_page_ocr_response(self, raw_response: str, expected_count: int) -> Dict[str, str]:
-        cleaned = raw_response.strip()
-        if cleaned.startswith("```"):
-            lines = cleaned.split("\n")
-            if lines[0].startswith("```"):
-                lines = lines[1:]
-            if lines and lines[-1].strip() == "```":
-                lines = lines[:-1]
-            cleaned = "\n".join(lines).strip()
+    def ocr_img(
+        self,
+        img: np.ndarray,
+        *,
+        prompt: Optional[str] = None,
+        **kwargs,
+    ) -> str:
+        profile = self.profile
+        messages = self._messages(img, profile, prompt=prompt)
+        return self._normalized_text(self._request_with_retries(
+            profile,
+            messages,
+            failure_label='LLM OCR',
+        ))
+
+    @classmethod
+    def _parse_page_ocr_response(
+        cls,
+        raw_response: str,
+        expected_count: int,
+        sort_reading_order: bool,
+    ) -> Tuple[Dict[str, str], Optional[List[str]]]:
+        """Validate a page response without salvaging partial or coerced data.
+
+        >>> LLMOCR._parse_page_ocr_response(
+        ...     '{"texts":{"1":" hello "},"order":["1"]}', 1, True)
+        ({'1': 'hello'}, ['1'])
+        """
 
         try:
-            data = json.loads(cleaned)
-            if isinstance(data, dict):
-                result = {}
-                for k, v in data.items():
-                    result[str(k).strip()] = self._normalized_text(str(v))
-                return result
+            data = json.loads(raw_response.strip())
+        except (TypeError, ValueError) as error:
+            raise ValueError('response is not valid JSON') from error
+        expected_fields = {'texts', 'order'} if sort_reading_order else {'texts'}
+        if not isinstance(data, dict) or set(data) != expected_fields:
+            fields_label = 'texts and order' if sort_reading_order else 'texts'
+            raise ValueError(f'response must contain exactly {fields_label}')
+
+        texts = data['texts']
+        order = data.get('order')
+        expected_ids = {str(index) for index in range(1, expected_count + 1)}
+        if not isinstance(texts, dict) or set(texts) != expected_ids:
+            raise ValueError('texts must contain every expected block ID exactly once')
+        if any(type(value) is not str for value in texts.values()):
+            raise ValueError('every texts value must be a string')
+        if sort_reading_order:
+            if (
+                not isinstance(order, list)
+                or len(order) != expected_count
+                or any(type(block_id) is not str for block_id in order)
+                or len(set(order)) != expected_count
+                or set(order) != expected_ids
+            ):
+                raise ValueError('order must contain every expected block ID exactly once')
+        normalized_texts = {
+            block_id: cls._normalized_text(text)
+            for block_id, text in texts.items()
+        }
+        return normalized_texts, order
+
+    def _ocr_blk_list(
+        self,
+        img: np.ndarray,
+        blk_list: List[TextBlock],
+        *args,
+        full_page: bool = False,
+        **kwargs,
+    ) -> Optional[List[TextBlock]]:
+        if not pcfg.module.ocr_llm_page_level or not full_page or not blk_list:
+            return super()._ocr_blk_list(img, blk_list, *args, **kwargs)
+
+        self.logger.info(f"Performing Page-level LLM OCR on {len(blk_list)} blocks...")
+        mask_non_text = pcfg.module.ocr_llm_mask_non_text
+        sort_reading_order = pcfg.module.ocr_llm_sort_reading_order
+        annotated_img = create_annotated_page(
+            img,
+            blk_list,
+            mask_non_text=mask_non_text,
+        )
+
+        try:
+            profile = self.profile
+            expected_count = len(blk_list)
+            messages = self._page_messages(
+                annotated_img,
+                profile,
+                expected_count,
+                mask_non_text,
+                sort_reading_order,
+            )
+            raw_response = self._request_with_retries(
+                profile,
+                messages,
+                failure_label='Page-level LLM OCR request',
+                response_schema=self._page_response_schema(
+                    expected_count,
+                    sort_reading_order,
+                ),
+            )
+            texts, order = self._parse_page_ocr_response(
+                raw_response,
+                expected_count,
+                sort_reading_order,
+            )
+            for i, blk in enumerate(blk_list):
+                blk.text = texts[str(i + 1)]
+
+            if sort_reading_order and order is not None:
+                self.logger.info("Page-level OCR: Re-ordered text blocks based on LLM reading order flow.")
+                return [blk_list[int(block_id) - 1] for block_id in order]
+            return None
+        except (LLMApiKeyRequiredError, LLMModelRequiredError, LLMRequestStopped):
+            raise
         except Exception as e:
-            self.logger.error(f"Failed to parse page-level OCR JSON response: {e}. Raw response: {raw_response}")
-
-        # Fallback to regex pattern matching
-        result = {}
-        pattern = re.compile(r'"(\d+)"\s*:\s*"([^"]*)"')
-        for match in pattern.finditer(cleaned):
-            result[match.group(1)] = self._normalized_text(match.group(2))
-        return result
-
-    def _ocr_single_block_fallback(self, img: np.ndarray, blk: TextBlock):
-        im_h, im_w = img.shape[:2]
-        x1, y1, x2, y2 = blk.xyxy
-        y1c, y2c = max(0, y1), min(im_h, y2)
-        x1c, x2c = max(0, x1), min(im_w, x2)
-        if y1c < y2c and x1c < x2c:
-            cropped_img = img[y1c:y2c, x1c:x2c]
-            blk.text = self.ocr_img(cropped_img)
-        else:
-            blk.text = ""
+            self.logger.error(f"Page-level LLM OCR failed: {e}. Falling back to block-by-block OCR.")
+            return super()._ocr_blk_list(img, blk_list, *args, **kwargs)

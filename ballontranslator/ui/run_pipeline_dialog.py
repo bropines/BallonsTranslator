@@ -58,7 +58,7 @@ from ballontranslator.utils.config import (
     save_config,
     TranslateContext,
 )
-from ballontranslator.utils.llm_profiles import LLM_TRANSLATOR_KEY
+from ballontranslator.utils.llm_profiles import LLM_OCR_KEY, LLM_TRANSLATOR_KEY
 from ballontranslator.utils.proj_imgtrans import ProjImgTrans
 from ballontranslator.modules import (
     GET_VALID_INPAINTERS,
@@ -777,6 +777,45 @@ class RunPipelineDialog(QDialog):
             'ocr_font_detect',
         )
 
+        self.llm_ocr_settings = QWidget(section)
+        self.llm_ocr_settings.setObjectName('RunPipelineLLMOCRSettings')
+        llm_ocr_layout = QVBoxLayout(self.llm_ocr_settings)
+        llm_ocr_layout.setContentsMargins(0, 0, 0, 0)
+        llm_ocr_layout.setSpacing(6)
+        self.llm_ocr_page_level = self._add_checkbox_setting(
+            self.llm_ocr_settings,
+            llm_ocr_layout,
+            'RunPipelineLLMOCRPageLevel',
+            self.tr('Page-level LLM OCR'),
+            pcfg.module.ocr_llm_page_level,
+            pcfg.module,
+            'ocr_llm_page_level',
+        )
+        self.llm_ocr_mask_non_text = self._add_checkbox_setting(
+            self.llm_ocr_settings,
+            llm_ocr_layout,
+            'RunPipelineLLMOCRMaskNonText',
+            self.tr('Mask non-text areas'),
+            pcfg.module.ocr_llm_mask_non_text,
+            pcfg.module,
+            'ocr_llm_mask_non_text',
+        )
+        self.llm_ocr_reading_order = self._add_checkbox_setting(
+            self.llm_ocr_settings,
+            llm_ocr_layout,
+            'RunPipelineLLMOCRReadingOrder',
+            self.tr('Use LLM reading order'),
+            pcfg.module.ocr_llm_sort_reading_order,
+            pcfg.module,
+            'ocr_llm_sort_reading_order',
+        )
+        self.llm_ocr_page_level.toggled.connect(
+            self._sync_llm_ocr_option_state
+        )
+        layout.addWidget(self.llm_ocr_settings)
+        self._sync_llm_ocr_option_state()
+        self.llm_ocr_settings.setVisible(pcfg.module.ocr == LLM_OCR_KEY)
+
         postprocess_options_row = QWidget(section)
         postprocess_options_row.setObjectName('RunPipelineGeneralSettingRow')
         postprocess_options_row.setAttribute(
@@ -834,6 +873,15 @@ class RunPipelineDialog(QDialog):
             pcfg.module.ocr_text_postprocess = button.property(
                 'textPostprocessMode'
             )
+
+    def _sync_llm_ocr_option_state(self, _checked: bool = False) -> None:
+        page_level = self.llm_ocr_page_level.isChecked()
+        self.llm_ocr_mask_non_text.setEnabled(page_level)
+        self.llm_ocr_reading_order.setEnabled(page_level)
+
+    def _set_llm_ocr_settings_visible(self, module_name: str) -> None:
+        self.llm_ocr_settings.setVisible(module_name == LLM_OCR_KEY)
+        self._fit_to_current_workflow()
 
     def _build_inpainting_settings(self, section: QWidget, layout: QVBoxLayout):
         self.skip_simple_cases = self._add_checkbox_setting(
@@ -1058,6 +1106,60 @@ class RunPipelineDialog(QDialog):
         translation_grid.addWidget(glossary_row, 2, 0)
         translation_grid.addWidget(mode_row, 2, 1)
 
+        llm_features_row = QWidget(section)
+        self.llm_features_row = llm_features_row
+        llm_features_row.setObjectName('RunPipelineGeneralSettingRow')
+        llm_features_layout = QHBoxLayout(llm_features_row)
+        llm_features_layout.setContentsMargins(0, 0, 0, 0)
+        llm_features_layout.setSpacing(8)
+        llm_features_label = QLabel(
+            self.tr('LLM context'),
+            llm_features_row,
+        )
+        llm_features_label.setObjectName('RunPipelineSettingLabel')
+        llm_features_layout.addWidget(llm_features_label)
+        llm_features_layout.addStretch()
+        self.llm_vision_checkbox = QCheckBox(
+            self.tr('Vision'),
+            llm_features_row,
+        )
+        self.llm_vision_checkbox.setObjectName(
+            'RunPipelineLLMFeatureCheckBox'
+        )
+        self.llm_vision_checkbox.setChecked(pcfg.module.llm_translate_vision)
+        self.llm_summary_checkbox = QCheckBox(
+            self.tr('Summary'),
+            llm_features_row,
+        )
+        self.llm_summary_checkbox.setObjectName(
+            'RunPipelineLLMFeatureCheckBox'
+        )
+        self.llm_summary_checkbox.setChecked(pcfg.module.llm_translate_summary)
+        self.llm_memory_checkbox = QCheckBox(
+            self.tr('Memory'),
+            llm_features_row,
+        )
+        self.llm_memory_checkbox.setObjectName(
+            'RunPipelineLLMFeatureCheckBox'
+        )
+        self.llm_memory_checkbox.setChecked(pcfg.module.llm_translate_memory)
+        for checkbox in (
+            self.llm_vision_checkbox,
+            self.llm_summary_checkbox,
+            self.llm_memory_checkbox,
+        ):
+            llm_features_layout.addWidget(checkbox)
+        self.llm_vision_checkbox.setToolTip(self.tr(
+            'Attach the current page image to the translation request.'
+        ))
+        self.llm_summary_checkbox.setToolTip(self.tr(
+            'Return and save a page summary in the same translation request.'
+        ))
+        self.llm_memory_checkbox.setToolTip(self.tr(
+            'Use compact project memory and update it at history boundaries.'
+        ))
+        translation_grid.addWidget(llm_features_row, 3, 0, 1, 2)
+
         self.context_row.setVisible(not self._llm_settings_visible)
 
         self.source_combobox.currentTextChanged.connect(
@@ -1082,6 +1184,16 @@ class RunPipelineDialog(QDialog):
         self.glossary_mode_combobox.currentIndexChanged.connect(
             self._on_glossary_mode_changed
         )
+        self.llm_vision_checkbox.toggled.connect(
+            self._on_llm_vision_toggled
+        )
+        self.llm_summary_checkbox.toggled.connect(
+            self._on_llm_summary_toggled
+        )
+        self.llm_memory_checkbox.toggled.connect(
+            self._on_llm_memory_toggled
+        )
+        self.llm_features_row.setVisible(self._llm_settings_visible)
 
     def setTranslatorMetadata(self, metadata: dict) -> None:
         self.translator_metadata = metadata or {}
@@ -1114,6 +1226,7 @@ class RunPipelineDialog(QDialog):
         )
         self.glossary_row.setVisible(self._llm_settings_visible)
         self.glossary_mode_row.setVisible(self._llm_settings_visible)
+        self.llm_features_row.setVisible(self._llm_settings_visible)
         self._fit_to_current_workflow()
 
     def _on_translate_source_changed(self, source: str):
@@ -1135,6 +1248,14 @@ class RunPipelineDialog(QDialog):
             self._llm_settings_visible
             and context == LLMTranslateContext.HISTORY
         )
+    def _on_llm_vision_toggled(self, checked: bool) -> None:
+        pcfg.module.llm_translate_vision = checked
+
+    def _on_llm_summary_toggled(self, checked: bool) -> None:
+        pcfg.module.llm_translate_summary = checked
+
+    def _on_llm_memory_toggled(self, checked: bool) -> None:
+        pcfg.module.llm_translate_memory = checked
 
     def _on_prior_context_token_budget_changed(self, budget: int):
         pcfg.module.llm_prior_context_token_budget = budget
@@ -1264,6 +1385,8 @@ class RunPipelineDialog(QDialog):
         )
 
     def setModuleSelection(self, module_type: str, module_name: str) -> None:
+        if module_type == 'ocr':
+            self._set_llm_ocr_settings_visible(module_name)
         for activator in self.module_activators:
             if activator.module_type == module_type:
                 activator.setModule(module_name)
