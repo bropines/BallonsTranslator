@@ -9,6 +9,7 @@ import enum
 import math
 from numbers import Real
 import re
+import copy
 from typing import ClassVar, Iterator, Mapping, Optional, Sequence, Set, Tuple
 
 import numpy as np

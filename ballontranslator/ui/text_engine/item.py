@@ -511,7 +511,6 @@ class TextBlkItem(QGraphicsTextItem):
             self.apply_hyphenation(True)
         if self.fontformat.gradient_enabled:
             self.setGradientEnabled(True)
-        self.setShadow(font_fmt, repaint=False)
         self.setStrokeWidth(font_fmt.stroke_width, repaint_background=False)
         self.repaint_background()
 
