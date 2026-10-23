@@ -198,11 +198,48 @@ def validate_photoshop_bridge_updates(
     return page_name, validated
 
 
+# Photoshop's install folder holds Presets/Scripts next to the .app bundle.
+MACOS_PHOTOSHOP_GLOBS = (
+    '/Applications/Adobe Photoshop*/Adobe Photoshop*.app',
+    '~/Applications/Adobe Photoshop*/Adobe Photoshop*.app',
+)
+
+
+def _macos_photoshop_paths() -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Return the newest Photoshop folder, its Scripts folder and its .app bundle.
+
+    >>> _macos_photoshop_paths()  # doctest: +SKIP
+    ('/Applications/Adobe Photoshop 2026', '/Applications/Adobe Photoshop 2026/Presets/Scripts', '/Applications/Adobe Photoshop 2026/Adobe Photoshop 2026.app')
+    """
+    apps = [
+        app for pattern in MACOS_PHOTOSHOP_GLOBS
+        for app in glob.glob(os.path.expanduser(pattern)) if os.path.isdir(app)
+    ]
+    if not apps:
+        return None, None, None
+
+    def release_year(app: str) -> int:
+        # "Adobe Photoshop 2026" sorts below "Adobe Photoshop CC 2019" by name.
+        years = re.findall(r'\d{4}', os.path.basename(app))
+        return int(years[-1]) if years else 0
+
+    app_path = max(apps, key=release_year)
+    ps_dir = os.path.dirname(app_path)
+    scripts_dir = os.path.join(ps_dir, 'Presets', 'Scripts')
+    return ps_dir, scripts_dir if os.path.isdir(scripts_dir) else None, app_path
+
+
 def get_photoshop_paths():
-    """Detect Photoshop installation directory and presets/scripts directory via Windows registry."""
+    """Detect Photoshop's install folder, Scripts folder and executable.
+
+    Windows reads the App Paths registry keys; macOS looks for the .app bundle.
+    """
     ps_dir = None
     scripts_dir = None
     exe_path = None
+
+    if sys.platform == 'darwin':
+        return _macos_photoshop_paths()
 
     if sys.platform == 'win32':
         import winreg
@@ -259,6 +296,46 @@ def get_photoshop_paths():
                     exe_path = cand_exe
 
     return ps_dir, scripts_dir, exe_path
+
+
+def open_with_system(path: str, reveal: bool = False) -> None:
+    """Open a file or folder with the platform's default handler.
+
+    ``reveal`` selects the item in Explorer or Finder instead of opening it.
+
+    >>> open_with_system('/tmp')  # doctest: +SKIP
+    """
+    if sys.platform == 'win32':
+        if reveal:
+            subprocess.Popen(f'explorer.exe /select,"{os.path.normpath(path)}"')
+        else:
+            os.startfile(path)
+    elif sys.platform == 'darwin':
+        subprocess.Popen(['open', '-R', path] if reveal else ['open', path])
+    else:
+        subprocess.Popen(['xdg-open', os.path.dirname(path) if reveal else path])
+
+
+def photoshop_script_command(exe_path: str, jsx_path: str) -> List[str]:
+    """Build the command that makes Photoshop run a JSX script.
+
+    macOS has no ``-r`` switch, so AppleScript feeds the script text to
+    Photoshop; the path travels as an argument to avoid quoting issues.
+
+    >>> photoshop_script_command('Photoshop.exe', 'b.jsx')  # doctest: +SKIP
+    ['Photoshop.exe', '-r', 'b.jsx']
+    """
+    if sys.platform != 'darwin':
+        return [exe_path, '-r', jsx_path]
+    app_name = os.path.splitext(os.path.basename(exe_path))[0].replace('"', '')
+    return [
+        'osascript',
+        '-e', 'on run argv',
+        '-e', f'tell application "{app_name}" to do javascript '
+              '(read (POSIX file (item 1 of argv)) as «class utf8»)',
+        '-e', 'end run',
+        jsx_path,
+    ]
 
 
 def extract_jsx_version(jsx_path: str) -> str:
@@ -634,8 +711,6 @@ class PhotoshopBridgeDialog(QDialog):
         source_jsx: str,
         scripts_dir: str,
     ) -> None:
-        if sys.platform != "win32":
-            return
         destination_dir = scripts_dir
         while destination_dir and not os.path.isdir(destination_dir):
             parent_dir = os.path.dirname(destination_dir)
@@ -643,10 +718,9 @@ class PhotoshopBridgeDialog(QDialog):
                 break
             destination_dir = parent_dir
         try:
-            source_norm = os.path.normpath(source_jsx)
-            subprocess.Popen(f'explorer.exe /select,"{source_norm}"')
+            open_with_system(os.path.normpath(source_jsx), reveal=True)
             if destination_dir and os.path.isdir(destination_dir):
-                subprocess.Popen(f'explorer.exe "{os.path.normpath(destination_dir)}"')
+                open_with_system(os.path.normpath(destination_dir))
         except OSError as error:
             LOGGER.warning("Failed to open manual Photoshop install folders: %s", error)
 
@@ -715,15 +789,16 @@ class PhotoshopBridgeDialog(QDialog):
                 )
                 return
 
-        if exe_path and os.path.isfile(exe_path):
+        # On macOS the executable is the .app bundle, which is a directory.
+        if exe_path and os.path.exists(exe_path):
             try:
-                subprocess.Popen([exe_path, "-r", target_jsx])
+                subprocess.Popen(photoshop_script_command(exe_path, target_jsx))
             except Exception as e:
                 LOGGER.error(f"Failed to launch Photoshop with script: {e}")
-                os.startfile(target_jsx)
+                open_with_system(target_jsx)
         else:
             try:
-                os.startfile(target_jsx)
+                open_with_system(target_jsx)
             except Exception as e:
                 QMessageBox.warning(self, self.tr("Error"), f"{self.tr('Failed to open Photoshop')}: {e}")
                 return
@@ -741,9 +816,4 @@ class PhotoshopBridgeDialog(QDialog):
             "scripts", "export to photoshop"
         )
         if os.path.isdir(scripts_dir):
-            if sys.platform == 'win32':
-                subprocess.Popen(['explorer.exe', scripts_dir])
-            elif sys.platform == 'darwin':
-                subprocess.Popen(['open', scripts_dir])
-            else:
-                subprocess.Popen(['xdg-open', scripts_dir])
+            open_with_system(scripts_dir)

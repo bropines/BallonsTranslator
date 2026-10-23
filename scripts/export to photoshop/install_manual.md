@@ -35,7 +35,8 @@ Advanced bidirectional bridge between **BallonsTranslator** and **Adobe Photosho
 1. Open BallonsTranslator.
 2. Go to **Tools -> Photoshop Bridge** (`Ctrl+Shift+P`).
 3. Click **Install / Update Script in Photoshop**.
-4. If Photoshop's installation directory is protected, BallonsTranslator opens the source and destination folders for a manual copy. Windows may request permission when you copy through Explorer.
+4. If Photoshop's installation directory is protected, BallonsTranslator opens the source and destination folders (Explorer on Windows, Finder on macOS) for a manual copy. The system may ask for permission when you copy.
+5. On macOS, the first **Open Current Project in Photoshop** asks to let BallonsTranslator control Photoshop (System Settings -> Privacy & Security -> Automation). Allow it: the bridge script is started through AppleScript.
 
 ### Method 2: Manual Installation
 Copy `BallonTranslator_PS_Bridge.jsx` directly into:

@@ -13,6 +13,7 @@ from ballontranslator.ui.mainwindow import MainWindow
 from ballontranslator.ui.ps_bridge_dialog import (
     PhotoshopBridgeDialog,
     PhotoshopBridgeUpdateError,
+    get_photoshop_paths,
     photoshop_bridge_block_snapshot,
     project_state_matches_disk,
     validate_photoshop_bridge_updates,
@@ -217,6 +218,67 @@ class PhotoshopBridgeTest(unittest.TestCase):
         warning_text = warning.call_args.args[2]
         self.assertIn(os.path.normpath(source_jsx), warning_text)
         self.assertIn(os.path.normpath(scripts_dir), warning_text)
+        dialog.deleteLater()
+
+    def _make_macos_photoshop(self, release: str) -> str:
+        install_dir = os.path.join(self.temp_dir.name, f"Adobe Photoshop {release}")
+        os.makedirs(os.path.join(install_dir, f"Adobe Photoshop {release}.app"))
+        os.makedirs(os.path.join(install_dir, "Presets", "Scripts"))
+        return install_dir
+
+    def test_macos_detection_finds_the_newest_app_bundle(self) -> None:
+        self._make_macos_photoshop("CC 2019")
+        newest = self._make_macos_photoshop("2026")
+        pattern = os.path.join(self.temp_dir.name, "Adobe Photoshop*", "Adobe Photoshop*.app")
+        with patch("ballontranslator.ui.ps_bridge_dialog.sys.platform", "darwin"), patch(
+            "ballontranslator.ui.ps_bridge_dialog.MACOS_PHOTOSHOP_GLOBS", (pattern,)
+        ):
+            ps_dir, scripts_dir, app_path = get_photoshop_paths()
+
+        self.assertEqual(ps_dir, newest)
+        self.assertEqual(scripts_dir, os.path.join(newest, "Presets", "Scripts"))
+        self.assertEqual(app_path, os.path.join(newest, "Adobe Photoshop 2026.app"))
+
+    def test_macos_without_photoshop_reports_nothing(self) -> None:
+        pattern = os.path.join(self.temp_dir.name, "Adobe Photoshop*", "Adobe Photoshop*.app")
+        with patch("ballontranslator.ui.ps_bridge_dialog.sys.platform", "darwin"), patch(
+            "ballontranslator.ui.ps_bridge_dialog.MACOS_PHOTOSHOP_GLOBS", (pattern,)
+        ):
+            self.assertEqual(get_photoshop_paths(), (None, None, None))
+
+    def test_macos_launch_runs_the_bundled_script_through_applescript(self) -> None:
+        install_dir = self._make_macos_photoshop("2026")
+        app_path = os.path.join(install_dir, "Adobe Photoshop 2026.app")
+        dialog = PhotoshopBridgeDialog(project=self.project)
+        with patch("ballontranslator.ui.ps_bridge_dialog.sys.platform", "darwin"), patch(
+            "ballontranslator.ui.ps_bridge_dialog.get_photoshop_paths",
+            return_value=(install_dir, os.path.join(install_dir, "Presets", "Scripts"), app_path),
+        ), patch("ballontranslator.ui.ps_bridge_dialog.subprocess.Popen") as popen:
+            dialog.on_open_in_photoshop()
+
+        command = popen.call_args.args[0]
+        self.assertEqual(command[0], "osascript")
+        self.assertEqual(os.path.basename(command[-1]), "BallonTranslator_PS_Bridge.jsx")
+        script = " ".join(command[1:-1])
+        self.assertIn('tell application "Adobe Photoshop 2026"', script)
+        # The path is an argument, never spliced into the AppleScript source.
+        self.assertNotIn(command[-1], script)
+        dialog._update_timer.stop()
+        dialog.deleteLater()
+
+    def test_windows_launch_keeps_the_run_switch(self) -> None:
+        exe_path = os.path.join(self.temp_dir.name, "Photoshop.exe")
+        open(exe_path, "w").close()
+        dialog = PhotoshopBridgeDialog(project=self.project)
+        with patch("ballontranslator.ui.ps_bridge_dialog.sys.platform", "win32"), patch(
+            "ballontranslator.ui.ps_bridge_dialog.get_photoshop_paths",
+            return_value=(self.temp_dir.name, None, exe_path),
+        ), patch("ballontranslator.ui.ps_bridge_dialog.subprocess.Popen") as popen:
+            dialog.on_open_in_photoshop()
+
+        command = popen.call_args.args[0]
+        self.assertEqual(command[:2], [exe_path, "-r"])
+        dialog._update_timer.stop()
         dialog.deleteLater()
 
 
