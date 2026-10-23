@@ -1,10 +1,10 @@
 // BallonTranslator_PS_Bridge.jsx
-// Version: 2.5.3
+// Version: 2.5.4
 // Multilingual Bidirectional Bridge between BallonsTranslator and Adobe Photoshop (CC 2019 - CC 2026+)
 
 #target photoshop
 
-var BT_BRIDGE_VERSION = "2.5.3";
+var BT_BRIDGE_VERSION = "2.5.4";
 
 
 
@@ -848,10 +848,10 @@ function runBallonTranslatorBridge() {
             if (block.fontformat) {
                 try {
                     var sizePt = tLayer.textItem.size.as("pt");
-                    fontSize = Math.round(sizePt * (activeDocRes / 72.0));
+                    fontSize = sizePt * (activeDocRes / 72.0);
                 } catch (e) {
                     try {
-                        fontSize = Math.round(tLayer.textItem.size.as("px"));
+                        fontSize = tLayer.textItem.size.as("px");
                     } catch (e2) {}
                 }
             }
@@ -859,6 +859,16 @@ function runBallonTranslatorBridge() {
             var originalTranslation = block.translation || "";
             var originalFontSize = block.fontformat ?
                 block.fontformat.font_size : null;
+            // The import set this exact size, so only float noise separates an
+            // untouched layer from it. Never round sizes the user did not change.
+            if (
+                fontSize !== null && originalFontSize !== null &&
+                Math.abs(fontSize - originalFontSize) < 0.1
+            ) {
+                fontSize = originalFontSize;
+            } else if (fontSize !== null) {
+                fontSize = Math.round(fontSize * 100) / 100;
+            }
             if (
                 contents === originalTranslation.replace(/\r\n/g, "\n").replace(/\r/g, "\n") &&
                 (fontSize === null || fontSize === originalFontSize)

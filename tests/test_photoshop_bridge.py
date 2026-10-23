@@ -123,6 +123,26 @@ class PhotoshopBridgeTest(unittest.TestCase):
         with self.assertRaises(PhotoshopBridgeUpdateError):
             validate_photoshop_bridge_updates(self.project, payload)
 
+    def test_font_size_rounded_by_extendscript_still_matches(self) -> None:
+        block = self.project.pages["page.png"][0]
+        block.font_size = 14.399999999999999
+        payload = self._payload(0)
+        # ExtendScript prints numbers with 15 significant digits.
+        payload["updates"][0]["base"]["font_size"] = 14.4
+
+        page_name, updates = validate_photoshop_bridge_updates(self.project, payload)
+
+        self.assertEqual((page_name, updates[0][0]), ("page.png", block))
+
+    def test_a_real_font_size_change_is_still_rejected(self) -> None:
+        block = self.project.pages["page.png"][0]
+        block.font_size = 14.4
+        payload = self._payload(0)
+        payload["updates"][0]["base"]["font_size"] = 14.5
+
+        with self.assertRaises(PhotoshopBridgeUpdateError):
+            validate_photoshop_bridge_updates(self.project, payload)
+
     def test_unsaved_app_changes_block_the_update(self) -> None:
         payload = self._payload(0)
         fake_window = SimpleNamespace(

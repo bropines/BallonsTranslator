@@ -65,6 +65,34 @@ def photoshop_bridge_block_snapshot(block: TextBlock) -> dict:
     }
 
 
+def bridge_values_match(sent: Any, current: Any) -> bool:
+    """Compare a snapshot echoed by Photoshop with the project's value.
+
+    ExtendScript prints numbers with 15 significant digits, so a font size of
+    14.399999999999999 comes back as 14.4. Numbers match within that precision.
+
+    >>> bridge_values_match({"font_size": 14.4}, {"font_size": 14.399999999999999})
+    True
+    >>> bridge_values_match({"font_size": 14.0}, {"font_size": 15.0})
+    False
+    """
+    numbers = (int, float)
+    if (
+        isinstance(sent, numbers) and isinstance(current, numbers)
+        and not isinstance(sent, bool) and not isinstance(current, bool)
+    ):
+        return math.isclose(sent, current, rel_tol=1e-12, abs_tol=1e-9)
+    if isinstance(sent, dict) and isinstance(current, dict):
+        return sent.keys() == current.keys() and all(
+            bridge_values_match(sent[key], current[key]) for key in sent
+        )
+    if isinstance(sent, list) and isinstance(current, list):
+        return len(sent) == len(current) and all(
+            bridge_values_match(a, b) for a, b in zip(sent, current)
+        )
+    return sent == current
+
+
 def project_state_matches_disk(project: ProjImgTrans) -> bool:
     """Return whether the live project still matches its canonical JSON file."""
     project_path = getattr(project, "proj_path", "")
@@ -166,7 +194,9 @@ def validate_photoshop_bridge_updates(
         seen_indices.add(block_index)
 
         block = blocks[block_index]
-        if update.get("base") != photoshop_bridge_block_snapshot(block):
+        if not bridge_values_match(
+            update.get("base"), photoshop_bridge_block_snapshot(block)
+        ):
             raise PhotoshopBridgeUpdateError(
                 f"Block #{block_index + 1} on page '{page_name}' changed after "
                 "it was opened in Photoshop."
@@ -519,7 +549,7 @@ class PhotoshopBridgeDialog(QDialog):
             "scripts", "export to photoshop", "BallonTranslator_PS_Bridge.jsx"
         )
 
-        source_ver = extract_jsx_version(source_jsx) or "2.5.3"
+        source_ver = extract_jsx_version(source_jsx) or "2.5.4"
         source_hash = get_file_md5(source_jsx)
 
         installed_jsx = os.path.join(scripts_dir, "BallonTranslator_PS_Bridge.jsx") if scripts_dir else None
