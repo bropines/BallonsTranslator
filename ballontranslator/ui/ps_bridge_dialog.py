@@ -395,6 +395,7 @@ class PhotoshopBridgeDialog(QDialog):
 
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
+        self._schedule_status_fit()
         if self._pending_update_path:
             self._update_timer.start()
 
@@ -558,6 +559,7 @@ class PhotoshopBridgeDialog(QDialog):
             )
             self.install_btn.setText(self.tr("Install Script in Photoshop"))
 
+        self._schedule_status_fit()
         self._consume_bridge_update()
 
     def _set_sync_status(self, message: str, color: str) -> None:
@@ -565,6 +567,23 @@ class PhotoshopBridgeDialog(QDialog):
         self.sync_status_label.setStyleSheet(
             f"background: transparent; color: {color};"
         )
+        self._schedule_status_fit()
+
+    def _schedule_status_fit(self) -> None:
+        # A label's new height is known only after Qt processes its relayout.
+        QTimer.singleShot(0, self._fit_wrapped_status)
+
+    def _fit_wrapped_status(self) -> None:
+        """Grow the window when a status label wraps onto more lines.
+
+        A shown top-level window does not grow for height-for-width rows by
+        itself, so a status that wraps after showing would be clipped.
+        """
+        if not self.isVisible():
+            return
+        needed = self.layout().totalHeightForWidth(self.width())
+        if needed > self.height():
+            self.resize(self.width(), needed)
 
     def _bridge_update_paths(self) -> List[str]:
         paths = []

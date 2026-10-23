@@ -281,6 +281,26 @@ class PhotoshopBridgeTest(unittest.TestCase):
         dialog._update_timer.stop()
         dialog.deleteLater()
 
+    def test_status_that_wraps_after_showing_is_not_clipped(self) -> None:
+        dialog = PhotoshopBridgeDialog(project=self.project)
+        dialog.setMinimumWidth(480)
+        dialog.resize(480, 300)
+        dialog.show()
+        self.app.processEvents()
+        dialog._set_sync_status(
+            "Block #3 on page '0002.jpg' changed after it was opened in Photoshop.",
+            "#F44336",
+        )
+        # One pass lays the new text out, the next applies the fitted size.
+        self.app.processEvents()
+        self.app.processEvents()
+
+        label = dialog.sync_status_label
+        self.assertGreater(label.heightForWidth(label.width()), label.fontMetrics().height())
+        self.assertGreaterEqual(label.height(), label.heightForWidth(label.width()))
+        dialog.hide()
+        dialog.deleteLater()
+
 
 if __name__ == "__main__":
     unittest.main()
