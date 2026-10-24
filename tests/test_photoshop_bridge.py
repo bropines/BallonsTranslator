@@ -21,13 +21,13 @@ from ballontranslator.ui.mainwindow import MainWindow
 from ballontranslator.ui.ps_bridge_dialog import (
     PhotoshopBridgeDialog,
     PhotoshopBridgeUpdateError,
-    PhotoshopBridgeUpdatePoller,
     consume_photoshop_bridge_update,
     get_photoshop_paths,
     photoshop_bridge_block_snapshot,
     project_state_matches_disk,
     validate_photoshop_bridge_updates,
 )
+from ballontranslator.ui.ps_bridge_server import PhotoshopBridgeService
 from ballontranslator.utils.proj_imgtrans import ProjImgTrans, TextBlkEncoder
 from ballontranslator.utils.textblock import TextBlock
 
@@ -123,7 +123,8 @@ class PhotoshopBridgeTest(unittest.TestCase):
     def test_changed_snapshot_and_duplicate_numbers_are_rejected(self) -> None:
         payload = self._payload(0)
         payload["updates"][0]["base"]["text"] = ["different source"]
-        with self.assertRaises(PhotoshopBridgeUpdateError):
+        payload["updates"][0]["base"]["xyxy"] = [5, 5, 9, 9]
+        with self.assertRaisesRegex(PhotoshopBridgeUpdateError, "no longer matches"):
             validate_photoshop_bridge_updates(self.project, payload)
         self.assertEqual(self.project.pages["page.png"][0].translation, "one")
 
@@ -131,6 +132,55 @@ class PhotoshopBridgeTest(unittest.TestCase):
         payload["updates"].append(dict(payload["updates"][0]))
         with self.assertRaises(PhotoshopBridgeUpdateError):
             validate_photoshop_bridge_updates(self.project, payload)
+
+    def test_block_moved_or_ocr_fixed_in_the_app_is_still_the_same_block(self) -> None:
+        block = self.project.pages["page.png"][0]
+        payload = self._payload(0)
+        block.xyxy = [3, 3, 13, 13]
+        validate_photoshop_bridge_updates(self.project, payload)
+
+        block.xyxy = [0, 0, 10, 10]
+        block.text = ["fixed source"]
+        validate_photoshop_bridge_updates(self.project, payload)
+
+    def test_fields_the_update_does_not_change_may_differ(self) -> None:
+        block = self.project.pages["page.png"][0]
+        payload = self._payload(0)
+        payload["updates"][0]["font_size"] = None
+        block.font_size = 40
+
+        _, updates = validate_photoshop_bridge_updates(self.project, payload)
+
+        self.assertEqual(updates[0].translation, "updated 1")
+        self.assertIsNone(updates[0].font_size)
+
+    def test_font_and_box_changes_are_applied(self) -> None:
+        block = self.project.pages["page.png"][2]
+        payload = self._payload(2)
+        payload["updates"][0].update(
+            translation=block.translation,
+            font_size=None,
+            font_family="Bebas Neue",
+            box_delta=[5, -2, 5, 8],
+        )
+        fake_window = SimpleNamespace(
+            imgtrans_proj=self.project,
+            canvas=SimpleNamespace(
+                projstate_unsaved=False,
+                setProjSaveState=Mock(),
+                update_saved_undostep=Mock(),
+            ),
+            st_manager=SimpleNamespace(updateSceneTextitems=Mock()),
+            tr=lambda text: text,
+        )
+
+        count = MainWindow.apply_photoshop_bridge_updates(fake_window, payload)
+
+        self.assertEqual(count, 1)
+        self.assertEqual(block.translation, "three")
+        self.assertEqual(block.font_family, "Bebas Neue")
+        self.assertEqual(block._bounding_rect, [45, -2, 10, 20])
+        self.assertEqual(block.xyxy, [45, -2, 55, 18])
 
     def test_font_size_rounded_by_extendscript_still_matches(self) -> None:
         block = self.project.pages["page.png"][0]
@@ -268,15 +318,15 @@ class PhotoshopBridgeTest(unittest.TestCase):
         window = self._poller_window(
             Mock(side_effect=RuntimeError("Save the project to apply them."))
         )
-        poller = PhotoshopBridgeUpdatePoller(window)
-        with patch("ballontranslator.ui.ps_bridge_dialog.create_info_dialog") as info:
-            poller.check()
-            poller.check()
+        service = PhotoshopBridgeService(window)
+        with patch("ballontranslator.ui.ps_bridge_server.create_info_dialog") as info:
+            service.check_updates()
+            service.check_updates()
             self.assertEqual(info.call_count, 1)
             self.assertTrue(os.path.exists(update_path))
 
             window.apply_photoshop_bridge_updates = Mock(return_value=1)
-            poller.check()
+            service.check_updates()
 
         self.assertEqual(info.call_count, 2)
         self.assertIn("Applied 1", info.call_args.args[0])
@@ -290,8 +340,8 @@ class PhotoshopBridgeTest(unittest.TestCase):
         window.ps_bridge_dialog = dialog
         dialog.show()
         self.app.processEvents()
-        with patch("ballontranslator.ui.ps_bridge_dialog.create_info_dialog") as info:
-            PhotoshopBridgeUpdatePoller(window).check()
+        with patch("ballontranslator.ui.ps_bridge_server.create_info_dialog") as info:
+            PhotoshopBridgeService(window).check_updates()
 
         info.assert_not_called()
         self.assertIn("Applied 1", dialog.sync_status_label.text())

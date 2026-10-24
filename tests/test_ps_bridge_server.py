@@ -7,29 +7,80 @@ import unittest
 import urllib.error
 import urllib.request
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from qtpy.QtWidgets import QApplication, QWidget
+from qtpy.QtWidgets import QApplication, QMessageBox, QWidget
 
-from ballontranslator.ui.mainwindow import MainWindow
 from ballontranslator.ui.ps_bridge_dialog import (
     PhotoshopBridgeDialog,
     PhotoshopBridgeUpdateError,
     photoshop_bridge_block_snapshot,
 )
-from ballontranslator.ui.ps_bridge_server import PhotoshopBridgeServer
-from ballontranslator.utils.config import pcfg
+from ballontranslator.ui.ps_bridge_server import (
+    PhotoshopBridgeServer,
+    PhotoshopBridgeService,
+)
+from ballontranslator.utils.config import PS_BRIDGE_PORTS, pcfg
 from ballontranslator.utils.proj_imgtrans import ProjImgTrans
 from ballontranslator.utils.textblock import TextBlock
 
 TOKEN = "test-token"
-# The tests talk to 127.0.0.1 directly, never through a configured proxy.
+# The tests talk to localhost directly, never through a configured proxy.
 OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
-class PhotoshopBridgeServerTest(unittest.TestCase):
+def _ipv6_available() -> bool:
+    try:
+        with socket.socket(socket.AF_INET6) as probe:
+            probe.bind(("::1", 0))
+        return True
+    except OSError:
+        return False
+
+
+class BridgeRequests:
+    """Send requests from a worker thread while the Qt loop runs here."""
+
+    app: QApplication
+    port: int
+
+    def request(self, path, data=None, method=None, headers=None, host="127.0.0.1"):
+        all_headers = {"X-BT-Token": TOKEN}
+        all_headers.update(headers or {})
+        body = None
+        if data is not None:
+            body = json.dumps(data).encode("utf-8")
+            all_headers["Content-Type"] = "application/json"
+        request = urllib.request.Request(
+            f"http://{host}:{self.port}{path}",
+            data=body,
+            method=method,
+            headers=all_headers,
+        )
+        result = {}
+
+        def send() -> None:
+            try:
+                with OPENER.open(request, timeout=10) as response:
+                    result["response"] = (response.status, response.headers, response.read())
+            except urllib.error.HTTPError as error:
+                result["response"] = (error.code, error.headers, error.read())
+
+        thread = threading.Thread(target=send)
+        thread.start()
+        while thread.is_alive():
+            self.app.processEvents()
+            thread.join(0.01)
+        return result["response"]
+
+    def request_json(self, path, **kwargs):
+        status, _, body = self.request(path, **kwargs)
+        return status, json.loads(body)
+
+
+class PhotoshopBridgeServerTest(BridgeRequests, unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication([])
@@ -57,47 +108,14 @@ class PhotoshopBridgeServerTest(unittest.TestCase):
             canvas=SimpleNamespace(projstate_unsaved=False),
             apply_photoshop_bridge_updates=Mock(return_value=1),
         )
-        self.server = PhotoshopBridgeServer(self.window)
+        self.confirm_pairing = Mock(return_value=TOKEN)
+        self.server = PhotoshopBridgeServer(self.window, self.confirm_pairing)
         self.server.start(0, TOKEN)
-        self.port = self.server.address[1]
+        self.port = self.server.port
 
     def tearDown(self) -> None:
         self.server.stop()
         self.temp_dir.cleanup()
-
-    def request(self, path: str, data=None, method=None, headers=None):
-        """Send a request from a worker thread while the Qt loop runs here."""
-        all_headers = {"X-BT-Token": TOKEN}
-        all_headers.update(headers or {})
-        body = None
-        if data is not None:
-            body = json.dumps(data).encode("utf-8")
-            all_headers["Content-Type"] = "application/json"
-        request = urllib.request.Request(
-            f"http://127.0.0.1:{self.port}{path}",
-            data=body,
-            method=method,
-            headers=all_headers,
-        )
-        result = {}
-
-        def send() -> None:
-            try:
-                with OPENER.open(request, timeout=10) as response:
-                    result["response"] = (response.status, response.headers, response.read())
-            except urllib.error.HTTPError as error:
-                result["response"] = (error.code, error.headers, error.read())
-
-        thread = threading.Thread(target=send)
-        thread.start()
-        while thread.is_alive():
-            self.app.processEvents()
-            thread.join(0.01)
-        return result["response"]
-
-    def request_json(self, path: str, **kwargs):
-        status, _, body = self.request(path, **kwargs)
-        return status, json.loads(body)
 
     def test_requests_need_the_pairing_token(self) -> None:
         status, data = self.request_json("/api/v1/status", headers={"X-BT-Token": "wrong"})
@@ -106,8 +124,24 @@ class PhotoshopBridgeServerTest(unittest.TestCase):
 
         status, data = self.request_json("/api/v1/status")
         self.assertEqual(status, 200)
+        self.assertEqual(data["app"], "BallonsTranslator")
         self.assertEqual(data["project"]["pages"], ["page.png"])
         self.assertEqual(data["project"]["current_page"], "page.png")
+
+    def test_pairing_hands_out_the_token_only_when_the_user_agrees(self) -> None:
+        status, data = self.request_json("/api/v1/pair", data={}, headers={"X-BT-Token": ""})
+        self.assertEqual((status, data), (200, {"token": TOKEN}))
+
+        self.confirm_pairing.return_value = None
+        status, data = self.request_json("/api/v1/pair", data={}, headers={"X-BT-Token": ""})
+        self.assertEqual(status, 403)
+        self.assertNotIn("token", data)
+
+    @unittest.skipUnless(_ipv6_available(), "IPv6 loopback is not available")
+    def test_ipv6_localhost_is_served(self) -> None:
+        # Photoshop resolves localhost to ::1 on macOS.
+        status, _ = self.request_json("/api/v1/status", host="[::1]")
+        self.assertEqual(status, 200)
 
     def test_foreign_host_and_browser_preflight_are_refused(self) -> None:
         status, _ = self.request_json("/api/v1/status", headers={"Host": "evil.example"})
@@ -163,13 +197,13 @@ class PhotoshopBridgeServerTest(unittest.TestCase):
 
     def test_stopping_frees_the_port(self) -> None:
         self.server.stop()
-        self.assertIsNone(self.server.address)
+        self.assertIsNone(self.server.port)
         self.server.start(self.port, TOKEN)
         status, _ = self.request_json("/api/v1/status")
         self.assertEqual(status, 200)
 
 
-class PhotoshopBridgeLiveSettingsTest(unittest.TestCase):
+class PhotoshopBridgeServiceTest(BridgeRequests, unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication([])
@@ -180,13 +214,18 @@ class PhotoshopBridgeLiveSettingsTest(unittest.TestCase):
             pcfg.ps_bridge.live_port,
             pcfg.ps_bridge.live_token,
         )
-        self.busy = socket.socket()
-        self.busy.bind(("127.0.0.1", 0))
-        self.busy.listen()
-        self.free_port = self._free_port()
+        pcfg.ps_bridge.live_enabled = False
+        pcfg.ps_bridge.live_token = ""
+        self.port = self._free_bridge_port()
+        pcfg.ps_bridge.live_port = self.port
+        self.window = QWidget()
+        self.window.imgtrans_proj = ProjImgTrans()
+        self.service = PhotoshopBridgeService(self.window)
+        self.window.ps_bridge = self.service
 
     def tearDown(self) -> None:
-        self.busy.close()
+        self.service.shutdown()
+        self.window.deleteLater()
         (
             pcfg.ps_bridge.live_enabled,
             pcfg.ps_bridge.live_port,
@@ -194,50 +233,64 @@ class PhotoshopBridgeLiveSettingsTest(unittest.TestCase):
         ) = self.saved_settings
 
     @staticmethod
-    def _free_port() -> int:
-        with socket.socket() as probe:
-            probe.bind(("127.0.0.1", 0))
-            return probe.getsockname()[1]
-
-    def _window(self) -> QWidget:
-        window = QWidget()
-        window.ps_bridge_server = None
-        window.tr = lambda text: text
-        window.apply_ps_bridge_live_settings = (
-            lambda: MainWindow.apply_ps_bridge_live_settings(window)
-        )
-        return window
+    def _free_bridge_port() -> int:
+        for port in PS_BRIDGE_PORTS:
+            with socket.socket() as probe:
+                try:
+                    probe.bind(("127.0.0.1", port))
+                except OSError:
+                    continue
+                return port
+        raise unittest.SkipTest("No Photoshop Bridge port is free")
 
     def test_dialog_switch_starts_and_stops_the_server(self) -> None:
-        pcfg.ps_bridge.live_enabled = False
-        pcfg.ps_bridge.live_port = self.free_port
-        pcfg.ps_bridge.live_token = ""
-        window = self._window()
-        dialog = PhotoshopBridgeDialog(window)
-        self.assertIsNone(window.ps_bridge_server)
+        dialog = PhotoshopBridgeDialog(self.window)
+        self.assertIsNone(self.service.panel_port)
 
         dialog.live_checkbox.setChecked(True)
 
-        self.assertEqual(window.ps_bridge_server.address, ("127.0.0.1", self.free_port))
+        self.assertEqual(self.service.panel_port, self.port)
         self.assertTrue(pcfg.ps_bridge.live_token)
-        self.assertEqual(dialog.live_token_edit.text(), pcfg.ps_bridge.live_token)
-        self.assertIn(str(self.free_port), dialog.live_status_label.text())
+        self.assertIn(str(self.port), dialog.live_status_label.text())
 
         dialog.live_checkbox.setChecked(False)
-        self.assertIsNone(window.ps_bridge_server.address)
+        self.assertIsNone(self.service.panel_port)
         dialog.deleteLater()
-        window.deleteLater()
+
+    def test_pairing_asks_the_user_and_forgetting_revokes_the_token(self) -> None:
+        pcfg.ps_bridge.live_enabled = True
+        self.assertIsNone(self.service.apply_live_settings())
+        with patch(
+            "ballontranslator.ui.ps_bridge_server.QMessageBox.question",
+            return_value=QMessageBox.StandardButton.Yes,
+        ) as question:
+            status, data = self.request_json(
+                "/api/v1/pair", data={}, headers={"X-BT-Token": ""}
+            )
+        question.assert_called_once()
+        self.assertEqual(status, 200)
+        token = data["token"]
+        status, _ = self.request_json("/api/v1/status", headers={"X-BT-Token": token})
+        self.assertEqual(status, 200)
+        self.assertTrue(self.service.panel_connected())
+
+        self.service.forget_paired_panels()
+
+        status, _ = self.request_json("/api/v1/status", headers={"X-BT-Token": token})
+        self.assertEqual(status, 401)
 
     def test_busy_port_is_reported(self) -> None:
-        pcfg.ps_bridge.live_enabled = True
-        pcfg.ps_bridge.live_port = self.busy.getsockname()[1]
-        window = self._window()
+        busy = socket.socket()
+        busy.bind(("127.0.0.1", self.port))
+        busy.listen()
+        try:
+            pcfg.ps_bridge.live_enabled = True
+            message = self.service.apply_live_settings()
+        finally:
+            busy.close()
 
-        message = MainWindow.apply_ps_bridge_live_settings(window)
-
-        self.assertIn(str(pcfg.ps_bridge.live_port), message)
-        self.assertIsNone(window.ps_bridge_server.address)
-        window.deleteLater()
+        self.assertIn(str(self.port), message)
+        self.assertIsNone(self.service.panel_port)
 
 
 if __name__ == "__main__":

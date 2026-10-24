@@ -396,28 +396,31 @@ class AutoTateChuYokoConfig(Config):
                 setattr(self, setting.name, setting.default)
 
 
+# The Photoshop panel manifest must list every port it may use.
+PS_BRIDGE_PORTS = range(19871, 19876)
+
+
 @nested_dataclass
 class PhotoshopBridgeConfig(Config):
     """Settings for the local server the Photoshop panel connects to.
+
+    ``live_token`` is handed to panels the user allows to connect.
 
     >>> PhotoshopBridgeConfig(live_port=80).live_port
     19871
     """
 
     live_enabled: bool = False
-    live_port: int = 19871
+    live_port: int = PS_BRIDGE_PORTS[0]
     live_token: str = ''
 
     def __post_init__(self) -> None:
         if not isinstance(self.live_enabled, bool):
             LOGGER.warning('Discard invalid ps_bridge.live_enabled config.')
             self.live_enabled = False
-        if (
-            type(self.live_port) is not int
-            or not 1024 <= self.live_port <= 65535
-        ):
+        if type(self.live_port) is not int or self.live_port not in PS_BRIDGE_PORTS:
             LOGGER.warning('Discard invalid ps_bridge.live_port %r.', self.live_port)
-            self.live_port = 19871
+            self.live_port = PS_BRIDGE_PORTS[0]
         if not isinstance(self.live_token, str):
             LOGGER.warning('Discard invalid ps_bridge.live_token config.')
             self.live_token = ''

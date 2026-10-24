@@ -175,9 +175,9 @@ class MainWindow(mainwindow_cls):
             FramelessMoveResize.toggleMaxState(self)
         self.setAcceptDrops(True)
         if not shared.HEADLESS:
-            from .ps_bridge_dialog import PhotoshopBridgeUpdatePoller
+            from .ps_bridge_server import PhotoshopBridgeService
 
-            self.ps_bridge_poller = PhotoshopBridgeUpdatePoller(self)
+            self.ps_bridge = PhotoshopBridgeService(self)
 
         if open_dir != '' and osp.exists(open_dir):
             self.OpenProj(open_dir)
@@ -921,6 +921,8 @@ class MainWindow(mainwindow_cls):
         self.st_manager.hovering_transwidget = None
         self.st_manager.blockSignals(True)
         self.canvas.prepareClose()
+        if getattr(self, "ps_bridge", None) is not None:
+            self.ps_bridge.shutdown()
         pcfg.custom_colors = _current_custom_colors()
         self.save_config()
         return super().closeEvent(event)
@@ -1314,28 +1316,50 @@ class MainWindow(mainwindow_cls):
             self.imgtrans_proj,
             payload,
         )
-        changed = []
-        for block, translation, font_size in updates:
-            if (
-                block.translation != translation
-                or (font_size is not None and block.font_size != font_size)
-            ):
-                changed.append((block, translation, font_size))
+        changed = [
+            update for update in updates
+            if update.block.translation != update.translation
+            or update.font_size is not None
+            or update.font_family is not None
+            or update.box_delta is not None
+        ]
         if not changed:
             return 0
 
         old_values = [
-            (block, block.translation, block.rich_text, block.font_size)
-            for block, _, _ in changed
+            (
+                update.block,
+                update.block.translation,
+                update.block.rich_text,
+                update.block.fontformat.copy(),
+                None if update.block._bounding_rect is None else list(update.block._bounding_rect),
+                list(update.block.xyxy),
+            )
+            for update in changed
         ]
-        for block, translation, font_size in changed:
-            if block.translation != translation:
-                block.translation = translation
+        for update in changed:
+            block = update.block
+            if block.translation != update.translation:
+                block.translation = update.translation
                 # Rich HTML contains its own text and would otherwise hide the
                 # plain translation received from Photoshop.
                 block.rich_text = ""
-            if font_size is not None:
-                block.font_size = font_size
+            if update.font_size is not None:
+                block.font_size = update.font_size
+            if update.font_family is not None:
+                block.font_family = update.font_family
+                if block.rich_text:
+                    block.rich_text = set_html_family(block.rich_text, update.font_family)
+            if update.box_delta is not None:
+                left, top, right, bottom = update.box_delta
+                x, y, width, height = block.bounding_rect()
+                block._bounding_rect = [
+                    x + left,
+                    y + top,
+                    max(width + right - left, 1),
+                    max(height + bottom - top, 1),
+                ]
+                block.sync_xyxy_from_bounding_rect()
 
         current_page_updated = page_name == self.imgtrans_proj.current_img
         try:
@@ -1343,10 +1367,12 @@ class MainWindow(mainwindow_cls):
                 self.st_manager.updateSceneTextitems()
             self.imgtrans_proj.save(keep_exist_as_backup=True)
         except Exception as error:
-            for block, translation, rich_text, font_size in old_values:
+            for block, translation, rich_text, fontformat, rect, xyxy in old_values:
                 block.translation = translation
                 block.rich_text = rich_text
-                block.font_size = font_size
+                block.fontformat = fontformat
+                block._bounding_rect = rect
+                block.xyxy = xyxy
             if current_page_updated:
                 self.st_manager.updateSceneTextitems()
             raise RuntimeError(

@@ -9,14 +9,12 @@ import shutil
 import subprocess
 import tempfile
 import time
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, Callable, List, NamedTuple, Optional, Tuple
 
 from qtpy.QtWidgets import (
-    QApplication,
     QCheckBox,
     QDialog,
     QHBoxLayout,
-    QLineEdit,
     QSpinBox,
     QVBoxLayout,
     QGroupBox,
@@ -26,12 +24,11 @@ from qtpy.QtWidgets import (
     QMessageBox,
     QSizePolicy,
 )
-from qtpy.QtCore import QCoreApplication, QObject, Qt, QTimer
-from qtpy.QtGui import QShowEvent
+from qtpy.QtCore import QCoreApplication, Qt, QTimer
+from qtpy.QtGui import QHideEvent, QShowEvent
 
-from ballontranslator.utils.config import pcfg
+from ballontranslator.utils.config import PS_BRIDGE_PORTS, pcfg
 from ballontranslator.utils.logger import logger as LOGGER
-from ballontranslator.utils.message import create_info_dialog
 from ballontranslator.utils.proj_imgtrans import ProjImgTrans, TextBlkEncoder
 from ballontranslator.utils.textblock import TextBlock
 
@@ -73,22 +70,47 @@ def normalize_bridge_text(text: str) -> str:
     return _CONTROL_CHARS.sub("", _LINE_BREAKS.sub("\n", text))
 
 
-def photoshop_bridge_block_snapshot(block: TextBlock) -> dict:
-    """Return the block fields a Photoshop update must still find unchanged.
+# Fields an update writes; each must still hold what Photoshop received.
+BRIDGE_WRITABLE_FIELDS = ("translation", "font_size", "font_family")
+# Fields that tell whether a block number still means the same block.
+BRIDGE_IDENTITY_FIELDS = ("text", "xyxy")
 
-    Photoshop overwrites the translation and font size, so both must still be
-    what it received. Source text and detection box identify the block. Rich
-    text and the text box are left out: saving a page regenerates both, and
-    Photoshop never writes them, so comparing them only causes false conflicts.
+
+def photoshop_bridge_block_snapshot(block: TextBlock) -> dict:
+    """Return the block values Photoshop received for later conflict checks.
+
+    Rich text and the text box are left out: saving a page regenerates both,
+    so comparing them would only cause false conflicts. Box changes arrive as
+    a delta and apply to the current box.
     """
     block_data = _json_value(block.to_dict())
     fontformat = block_data.get("fontformat") or {}
     return {
         "translation": block_data.get("translation", ""),
         "font_size": fontformat.get("font_size"),
+        "font_family": fontformat.get("font_family"),
         "text": block_data.get("text", []),
         "xyxy": block_data.get("xyxy", []),
     }
+
+
+class BridgeBlockUpdate(NamedTuple):
+    """One validated block change; None means the field is not changed."""
+
+    block: TextBlock
+    translation: str
+    font_size: Optional[float]
+    font_family: Optional[str]
+    # Moves of the left, top, right and bottom edges of the text box.
+    box_delta: Optional[Tuple[float, float, float, float]]
+
+
+def _is_number(value: Any) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )
 
 
 def bridge_values_match(sent: Any, current: Any) -> bool:
@@ -141,8 +163,14 @@ def project_state_matches_disk(project: ProjImgTrans) -> bool:
 def validate_photoshop_bridge_updates(
     project: ProjImgTrans,
     payload: dict,
-) -> Tuple[str, List[Tuple[TextBlock, str, Optional[float]]]]:
+) -> Tuple[str, List[BridgeBlockUpdate]]:
     """Validate a complete bridge payload before any project state is changed.
+
+    A block number must still mean the block Photoshop received: its source
+    text or its detection box is unchanged (moving a box in the app changes
+    the detection box, fixing OCR changes the text). Every field the update
+    changes must still hold the value Photoshop received; other fields may
+    have changed meanwhile and are kept.
 
     >>> from types import SimpleNamespace
     >>> from ballontranslator.utils.textblock import TextBlock
@@ -221,29 +249,19 @@ def validate_photoshop_bridge_updates(
 
         block = blocks[block_index]
         base = update.get("base")
+        if not isinstance(base, dict):
+            raise PhotoshopBridgeUpdateError(
+                f"Block #{block_index + 1} has no valid base values."
+            )
         current = photoshop_bridge_block_snapshot(block)
-        # Older scripts also send fields that are no longer compared.
-        conflicts = [
-            key for key, value in current.items()
-            if not isinstance(base, dict)
-            or key not in base
-            or not bridge_values_match(base[key], value)
-        ]
-        if "text" in conflicts or "xyxy" in conflicts:
+        if not any(
+            key in base and bridge_values_match(base[key], current[key])
+            for key in BRIDGE_IDENTITY_FIELDS
+        ):
             raise PhotoshopBridgeUpdateError(
                 f"Block #{block_index + 1} on page '{page_name}' no longer "
                 "matches its Photoshop layer. Import the page into Photoshop "
                 "again."
-            )
-        if conflicts:
-            fields = ", ".join(
-                "text" if key == "translation" else "font size"
-                for key in conflicts
-            )
-            raise PhotoshopBridgeUpdateError(
-                f"Block #{block_index + 1} on page '{page_name}' was edited in "
-                f"BallonsTranslator ({fields}) after Photoshop received it. "
-                "Import the page into Photoshop again."
             )
 
         translation = update.get("translation")
@@ -251,21 +269,61 @@ def validate_photoshop_bridge_updates(
             raise PhotoshopBridgeUpdateError(
                 f"Block #{block_index + 1} has invalid text."
             )
+        translation = normalize_bridge_text(translation)
         font_size = update.get("font_size")
         if font_size is not None and (
-            not isinstance(font_size, (int, float))
-            or isinstance(font_size, bool)
-            or not math.isfinite(font_size)
-            or font_size <= 0
+            not _is_number(font_size) or font_size <= 0
         ):
             raise PhotoshopBridgeUpdateError(
                 f"Block #{block_index + 1} has an invalid font size."
             )
+        font_family = update.get("font_family")
+        if font_family is not None and (
+            not isinstance(font_family, str) or not font_family.strip()
+        ):
+            raise PhotoshopBridgeUpdateError(
+                f"Block #{block_index + 1} has an invalid font."
+            )
+        box_delta = update.get("box_delta")
+        if box_delta is not None and (
+            not isinstance(box_delta, list)
+            or len(box_delta) != 4
+            or not all(_is_number(edge) for edge in box_delta)
+        ):
+            raise PhotoshopBridgeUpdateError(
+                f"Block #{block_index + 1} has an invalid box change."
+            )
+
+        written = {
+            "translation": translation != normalize_bridge_text(
+                str(base.get("translation") or "")
+            ),
+            "font_size": font_size is not None
+            and not bridge_values_match(font_size, base.get("font_size")),
+            "font_family": font_family is not None
+            and font_family != base.get("font_family"),
+        }
+        conflicts = [
+            key for key in BRIDGE_WRITABLE_FIELDS
+            if written[key] and (
+                key not in base or not bridge_values_match(base[key], current[key])
+            )
+        ]
+        if conflicts:
+            names = {"translation": "text", "font_size": "font size", "font_family": "font"}
+            fields = ", ".join(names[key] for key in conflicts)
+            raise PhotoshopBridgeUpdateError(
+                f"Block #{block_index + 1} on page '{page_name}' was edited in "
+                f"BallonsTranslator ({fields}) after Photoshop received it. "
+                "Import the page into Photoshop again."
+            )
         validated.append(
-            (
+            BridgeBlockUpdate(
                 block,
-                normalize_bridge_text(translation),
-                font_size,
+                translation,
+                font_size if written["font_size"] else None,
+                font_family if written["font_family"] else None,
+                tuple(box_delta) if box_delta is not None and any(box_delta) else None,
             )
         )
 
@@ -328,48 +386,6 @@ def consume_photoshop_bridge_update(
     return "applied", _tr("Applied {count} Photoshop change(s).").format(
         count=updated_count
     )
-
-
-class PhotoshopBridgeUpdatePoller(QObject):
-    """Apply the changes Photoshop leaves for the open project.
-
-    Photoshop can send changes at any time, and checking one file is cheap, so
-    a short poll needs no file watcher bookkeeping when projects change. While
-    the bridge window is visible it reports the outcome itself.
-    """
-
-    INTERVAL_MS = 1500
-
-    def __init__(self, window: QObject) -> None:
-        super().__init__(window)
-        self._window = window
-        self._blocked_message = ""
-        self._timer = QTimer(self)
-        self._timer.setInterval(self.INTERVAL_MS)
-        self._timer.timeout.connect(self.check)
-        self._timer.start()
-
-    def check(self) -> None:
-        project_path = self._window.imgtrans_proj.proj_path
-        if not project_path or not os.path.isfile(
-            photoshop_bridge_update_path(project_path)
-        ):
-            return
-        dialog = getattr(self._window, "ps_bridge_dialog", None)
-        if dialog is not None and dialog.isVisible():
-            dialog.check_for_update()
-            return
-        result = consume_photoshop_bridge_update(
-            project_path, self._window.apply_photoshop_bridge_updates
-        )
-        if result is None or result[0] == "waiting":
-            return
-        state, message = result
-        # A blocked update stays pending until the user saves; say so once.
-        if state == "blocked" and message == self._blocked_message:
-            return
-        self._blocked_message = message if state == "blocked" else ""
-        create_info_dialog(_tr("Photoshop Bridge") + ": " + message)
 
 
 # Photoshop's install folder holds Presets/Scripts next to the .app bundle.
@@ -569,6 +585,11 @@ class PhotoshopBridgeDialog(QDialog):
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
         self._schedule_status_fit()
+        self._live_status_timer.start()
+
+    def hideEvent(self, event: QHideEvent) -> None:
+        self._live_status_timer.stop()
+        super().hideEvent(event)
 
     def init_ui(self):
         layout = QVBoxLayout(self)
@@ -674,9 +695,12 @@ class PhotoshopBridgeDialog(QDialog):
         layout.addWidget(actions_group)
 
         # 3. Live connection for the Photoshop panel
-        live_group = QGroupBox(self.tr("Photoshop Panel Connection"))
+        live_group = QGroupBox(self.tr("Photoshop Panel"))
         live_group.setObjectName("PSLiveGroup")
         live_layout = QFormLayout(live_group)
+        live_layout.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
+        )
         live_layout.setSpacing(8)
         live_layout.setContentsMargins(12, 12, 12, 12)
 
@@ -685,31 +709,32 @@ class PhotoshopBridgeDialog(QDialog):
         )
         live_layout.addRow(self.live_checkbox)
 
+        port_row = QHBoxLayout()
         self.live_port_box = QSpinBox()
-        self.live_port_box.setRange(1024, 65535)
-        live_layout.addRow(QLabel(self.tr("Port:")), self.live_port_box)
-
-        token_row = QHBoxLayout()
-        self.live_token_edit = QLineEdit()
-        self.live_token_edit.setReadOnly(True)
-        token_row.addWidget(self.live_token_edit, 1)
-        copy_token_btn = QPushButton(self.tr("Copy"))
-        copy_token_btn.clicked.connect(self.on_copy_live_token)
-        token_row.addWidget(copy_token_btn)
-        new_token_btn = QPushButton(self.tr("New"))
-        new_token_btn.setToolTip(self.tr("Make a new token; paired panels must use the new one."))
-        new_token_btn.clicked.connect(self.on_new_live_token)
-        token_row.addWidget(new_token_btn)
-        live_layout.addRow(QLabel(self.tr("Pairing token:")), token_row)
+        self.live_port_box.setRange(PS_BRIDGE_PORTS[0], PS_BRIDGE_PORTS[-1])
+        port_row.addWidget(self.live_port_box)
+        port_row.addStretch(1)
+        self.forget_panels_btn = QPushButton(self.tr("Forget Connected Panels"))
+        self.forget_panels_btn.setToolTip(
+            self.tr("Panels must ask to connect again.")
+        )
+        self.forget_panels_btn.clicked.connect(self.on_forget_panels)
+        port_row.addWidget(self.forget_panels_btn)
+        live_layout.addRow(QLabel(self.tr("Port:")), port_row)
 
         self.live_status_label = QLabel()
         self.live_status_label.setWordWrap(True)
         live_layout.addRow(QLabel(self.tr("Status:")), self.live_status_label)
         layout.addWidget(live_group)
+        self._live_error = ""
         self._sync_live_controls()
         # Connect after the initial sync so building the dialog changes nothing.
         self.live_checkbox.toggled.connect(self.on_live_toggled)
         self.live_port_box.editingFinished.connect(self.on_live_port_changed)
+        # Shows whether a panel is talking to the server right now.
+        self._live_status_timer = QTimer(self)
+        self._live_status_timer.setInterval(2000)
+        self._live_status_timer.timeout.connect(self._sync_live_status)
 
         # 4. Help info
         info_label = QLabel(
@@ -817,28 +842,37 @@ class PhotoshopBridgeDialog(QDialog):
         colors = {"applied": "#4CAF50", "rejected": "#F44336"}
         self._set_sync_status(message, colors.get(state, "#FFA000"))
 
-    def _sync_live_controls(self, error: Optional[str] = None) -> None:
+    def _bridge_service(self) -> Any:
+        return getattr(self.parent(), "ps_bridge", None)
+
+    def _sync_live_controls(self) -> None:
         settings = pcfg.ps_bridge
         self.live_checkbox.setChecked(settings.live_enabled)
         self.live_port_box.setValue(settings.live_port)
-        self.live_token_edit.setText(settings.live_token)
-        server = getattr(self.parent(), "ps_bridge_server", None)
-        address = server.address if server is not None else None
-        if error:
-            text, color = error, "#F44336"
-        elif settings.live_enabled and address is not None:
-            text = self.tr("Listening on 127.0.0.1:{port}").format(port=address[1])
-            color = "#4CAF50"
-        else:
+        self._sync_live_status()
+
+    def _sync_live_status(self) -> None:
+        service = self._bridge_service()
+        port = service.panel_port if service is not None else None
+        if self._live_error:
+            text, color = self._live_error, "#F44336"
+        elif not pcfg.ps_bridge.live_enabled or port is None:
             text, color = self.tr("Off"), "gray"
+        elif service.panel_connected():
+            text, color = self.tr("Panel connected (port {port})").format(port=port), "#4CAF50"
+        else:
+            text = self.tr("Waiting for the panel on port {port}").format(port=port)
+            color = "#FFA000"
+        if text == self.live_status_label.text():
+            return
         self.live_status_label.setText(text)
         self.live_status_label.setStyleSheet(f"background: transparent; color: {color};")
         self._schedule_status_fit()
 
     def _apply_live_settings(self) -> None:
-        apply_settings = getattr(self.parent(), "apply_ps_bridge_live_settings", None)
-        error = apply_settings() if callable(apply_settings) else None
-        self._sync_live_controls(error)
+        service = self._bridge_service()
+        self._live_error = (service.apply_live_settings() or "") if service is not None else ""
+        self._sync_live_controls()
 
     def on_live_toggled(self, checked: bool) -> None:
         pcfg.ps_bridge.live_enabled = checked
@@ -851,14 +885,11 @@ class PhotoshopBridgeDialog(QDialog):
         pcfg.ps_bridge.live_port = port
         self._apply_live_settings()
 
-    def on_copy_live_token(self) -> None:
-        QApplication.clipboard().setText(self.live_token_edit.text())
-
-    def on_new_live_token(self) -> None:
-        from .ps_bridge_server import new_bridge_token
-
-        pcfg.ps_bridge.live_token = new_bridge_token()
-        self._apply_live_settings()
+    def on_forget_panels(self) -> None:
+        service = self._bridge_service()
+        if service is not None:
+            service.forget_paired_panels()
+        self._sync_live_status()
 
     def on_install_script(self) -> None:
         ps_dir, scripts_dir, _ = get_photoshop_paths()
