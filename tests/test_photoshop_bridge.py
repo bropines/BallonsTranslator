@@ -13,6 +13,7 @@ from ballontranslator.ui.mainwindow import MainWindow
 from ballontranslator.ui.ps_bridge_dialog import (
     PhotoshopBridgeDialog,
     PhotoshopBridgeUpdateError,
+    consume_photoshop_bridge_update,
     get_photoshop_paths,
     photoshop_bridge_block_snapshot,
     project_state_matches_disk,
@@ -73,7 +74,6 @@ class PhotoshopBridgeTest(unittest.TestCase):
             })
         return {
             "version": 1,
-            "session_id": "test",
             "project_path": self.project.proj_path,
             "page": "page.png",
             "block_count": 3,
@@ -168,13 +168,114 @@ class PhotoshopBridgeTest(unittest.TestCase):
 
         self.assertFalse(project_state_matches_disk(self.project))
 
-    def test_bridge_polls_only_for_a_visible_launched_session(self) -> None:
+    def test_page_save_regenerating_rich_text_and_box_is_not_a_conflict(self) -> None:
+        payload = self._payload(0)
+        block = self.project.pages["page.png"][0]
+        # Saving a page rebuilds both from the scene; Photoshop writes neither.
+        block.rich_text = "<html><body>one</body></html>"
+        block._bounding_rect = [1, 2, 30, 40]
+
+        page_name, updates = validate_photoshop_bridge_updates(self.project, payload)
+
+        self.assertEqual((page_name, updates[0][0]), ("page.png", block))
+
+    def test_payload_from_an_older_script_still_validates(self) -> None:
+        payload = self._payload(0)
+        block = self.project.pages["page.png"][0]
+        payload["updates"][0]["base"].update(
+            rich_text=block.rich_text,
+            bounding_rect=block._bounding_rect,
+        )
+        payload["session_id"] = "old-session"
+
+        page_name, _ = validate_photoshop_bridge_updates(self.project, payload)
+
+        self.assertEqual(page_name, "page.png")
+
+    def test_edit_made_in_the_app_after_photoshop_got_it_is_named(self) -> None:
+        payload = self._payload(0)
+        self.project.pages["page.png"][0].translation = "edited in the app"
+
+        with self.assertRaisesRegex(PhotoshopBridgeUpdateError, r"\(text\)"):
+            validate_photoshop_bridge_updates(self.project, payload)
+
+    def _write_update(self, payload: dict) -> str:
+        update_path = self.project.proj_path + ".ps_bridge_updates.json"
+        with open(update_path, "w", encoding="utf-8") as update_file:
+            json.dump(payload, update_file)
+        return update_path
+
+    def test_applied_update_file_is_removed(self) -> None:
+        update_path = self._write_update(self._payload(0))
+        apply_updates = Mock(return_value=1)
+
+        state, message = consume_photoshop_bridge_update(
+            self.project.proj_path, apply_updates
+        )
+
+        self.assertEqual(state, "applied")
+        self.assertIn("1", message)
+        apply_updates.assert_called_once_with(self._payload(0))
+        self.assertFalse(os.path.exists(update_path))
+
+    def test_blocked_update_waits_for_the_next_check(self) -> None:
+        update_path = self._write_update(self._payload(0))
+        apply_updates = Mock(side_effect=RuntimeError("unsaved changes"))
+
+        state, _ = consume_photoshop_bridge_update(self.project.proj_path, apply_updates)
+
+        self.assertEqual(state, "blocked")
+        self.assertTrue(os.path.exists(update_path))
+
+    def test_conflicting_update_is_set_aside_so_it_cannot_block_new_sends(self) -> None:
+        payload = self._payload(0)
+        payload["updates"][0]["base"]["translation"] = "something else"
+        update_path = self._write_update(payload)
+
+        def apply_updates(payload: dict) -> int:
+            validate_photoshop_bridge_updates(self.project, payload)
+            return 1
+
+        state, message = consume_photoshop_bridge_update(
+            self.project.proj_path, apply_updates
+        )
+
+        self.assertEqual(state, "rejected")
+        self.assertIn("Block #1", message)
+        self.assertFalse(os.path.exists(update_path))
+        self.assertTrue(os.path.isfile(
+            self.project.proj_path + ".ps_bridge_updates.rejected.json"
+        ))
+
+    def test_returning_to_the_app_applies_changes_and_reports_a_block_once(
+        self,
+    ) -> None:
+        update_path = self._write_update(self._payload(0))
+        window = SimpleNamespace(
+            imgtrans_proj=self.project,
+            ps_bridge_dialog=None,
+            _ps_bridge_blocked_message="",
+            apply_photoshop_bridge_updates=Mock(
+                side_effect=RuntimeError("Save the project to apply them.")
+            ),
+            tr=lambda text: text,
+        )
+        with patch("ballontranslator.ui.mainwindow.create_info_dialog") as info:
+            MainWindow.check_photoshop_bridge_update(window)
+            MainWindow.check_photoshop_bridge_update(window)
+            self.assertEqual(info.call_count, 1)
+            self.assertTrue(os.path.exists(update_path))
+
+            window.apply_photoshop_bridge_updates = Mock(return_value=1)
+            MainWindow.check_photoshop_bridge_update(window)
+
+        self.assertEqual(info.call_count, 2)
+        self.assertIn("Applied 1", info.call_args.args[0])
+        self.assertFalse(os.path.exists(update_path))
+
+    def test_bridge_polls_only_while_visible(self) -> None:
         dialog = PhotoshopBridgeDialog(project=self.project)
         self.assertFalse(dialog._update_timer.isActive())
-        dialog._pending_update_path = os.path.join(
-            self.temp_dir.name,
-            "pending.json",
-        )
         dialog.show()
         self.app.processEvents()
         self.assertTrue(dialog._update_timer.isActive())

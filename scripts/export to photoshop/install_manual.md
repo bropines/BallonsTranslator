@@ -52,10 +52,10 @@ Restart Photoshop (or run directly via `File -> Scripts -> Browse...` / `Ctrl+F1
 1. Translate and inpaint your project in **BallonsTranslator** and save the project.
 2. Open **Adobe Photoshop**.
 3. Go to **File -> Scripts -> BallonTranslator_PS_Bridge** (or `File -> Scripts -> Browse...` and select `BallonTranslator_PS_Bridge.jsx`).
-4. Select your project file `imgtrans_*.json`.
+4. Select your project file `imgtrans_*.json`. Skipped when BallonsTranslator opened Photoshop, or when the active document is a page imported by the bridge.
 5. In the dialog:
    - Choose pages to import.
    - Toggle clean plate, mask, translations, stroke FX, and vertical centering.
    - Click **Import Selected Pages**.
 6. Polish text and art in Photoshop.
-7. To push text updates back to BallonsTranslator, run the script and click **Send Changes to BallonsTranslator**.
+7. To push text updates back to BallonsTranslator, run the script with the page active and click **Send Changes to BallonsTranslator**. BallonsTranslator applies them when you switch back to it, or right away if the Photoshop Bridge window is open. Save unsaved work in BallonsTranslator first; pending changes are applied after the save.

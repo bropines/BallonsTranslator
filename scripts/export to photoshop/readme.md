@@ -22,6 +22,15 @@ BallonsTranslator (Qt UI)
 
 ---
 
+## Round-Trip Sync Contract
+
+- **Page state in the PSD.** Import writes XMP property `state` in namespace `http://github.com/dmMaze/BallonsTranslator/ns/psbridge/1.0/`: `{version: 1, project_path, page, blocks}`. `blocks[i]` holds the values block `i` had when Photoshop received it. Send Changes reads this instead of matching document names, and after a send stores the sent values so the next send compares against them. Documents without it fall back to name matching and the project file on disk.
+- **Compared fields.** `getBlockBase()` in the JSX and `photoshop_bridge_block_snapshot()` in `ps_bridge_dialog.py` must list the same fields: `translation` and `font_size` (what Photoshop overwrites) plus `text` and `xyxy` (block identity). Rich text and the text box are excluded because saving a page regenerates them.
+- **Update file.** Photoshop writes `<project>.json.ps_bridge_updates.json` next to the project, one pending set at a time. BallonsTranslator applies it when its main window is activated, after a project save, and while the bridge window is open. Unsaved changes keep it pending; a conflict renames it to `*.ps_bridge_updates.rejected.json`.
+- **Launch context.** **Open This Project in Photoshop** saves the project and writes `bt_ps_bridge_context.json` (project path and active page) to the temp folder; the script uses it if it is less than 5 minutes old.
+
+---
+
 ## 2. ExtendScript & Photoshop DOM Gotchas (Critical Invariants)
 
 When editing or extending `BallonTranslator_PS_Bridge.jsx`, you MUST adhere to the following rules:

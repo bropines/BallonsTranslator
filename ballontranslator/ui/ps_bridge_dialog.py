@@ -9,8 +9,7 @@ import shutil
 import subprocess
 import tempfile
 import time
-import uuid
-from typing import Any, List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple
 
 from qtpy.QtWidgets import (
     QDialog,
@@ -22,7 +21,7 @@ from qtpy.QtWidgets import (
     QMessageBox,
     QSizePolicy,
 )
-from qtpy.QtCore import Qt, QTimer
+from qtpy.QtCore import QCoreApplication, Qt, QTimer
 from qtpy.QtGui import QHideEvent, QShowEvent
 
 from ballontranslator.utils.logger import logger as LOGGER
@@ -53,15 +52,20 @@ def _project_page_blocks(
 
 
 def photoshop_bridge_block_snapshot(block: TextBlock) -> dict:
+    """Return the block fields a Photoshop update must still find unchanged.
+
+    Photoshop overwrites the translation and font size, so both must still be
+    what it received. Source text and detection box identify the block. Rich
+    text and the text box are left out: saving a page regenerates both, and
+    Photoshop never writes them, so comparing them only causes false conflicts.
+    """
     block_data = _json_value(block.to_dict())
     fontformat = block_data.get("fontformat") or {}
     return {
         "translation": block_data.get("translation", ""),
-        "rich_text": block_data.get("rich_text", ""),
         "font_size": fontformat.get("font_size"),
         "text": block_data.get("text", []),
         "xyxy": block_data.get("xyxy", []),
-        "bounding_rect": block_data.get("_bounding_rect"),
     }
 
 
@@ -194,12 +198,30 @@ def validate_photoshop_bridge_updates(
         seen_indices.add(block_index)
 
         block = blocks[block_index]
-        if not bridge_values_match(
-            update.get("base"), photoshop_bridge_block_snapshot(block)
-        ):
+        base = update.get("base")
+        current = photoshop_bridge_block_snapshot(block)
+        # Older scripts also send fields that are no longer compared.
+        conflicts = [
+            key for key, value in current.items()
+            if not isinstance(base, dict)
+            or key not in base
+            or not bridge_values_match(base[key], value)
+        ]
+        if "text" in conflicts or "xyxy" in conflicts:
             raise PhotoshopBridgeUpdateError(
-                f"Block #{block_index + 1} on page '{page_name}' changed after "
-                "it was opened in Photoshop."
+                f"Block #{block_index + 1} on page '{page_name}' no longer "
+                "matches its Photoshop layer. Import the page into Photoshop "
+                "again."
+            )
+        if conflicts:
+            fields = ", ".join(
+                "text" if key == "translation" else "font size"
+                for key in conflicts
+            )
+            raise PhotoshopBridgeUpdateError(
+                f"Block #{block_index + 1} on page '{page_name}' was edited in "
+                f"BallonsTranslator ({fields}) after Photoshop received it. "
+                "Import the page into Photoshop again."
             )
 
         translation = update.get("translation")
@@ -226,6 +248,64 @@ def validate_photoshop_bridge_updates(
         )
 
     return page_name, validated
+
+
+def photoshop_bridge_update_path(project_path: str) -> str:
+    """Return where Photoshop leaves changes for a project."""
+    return project_path + ".ps_bridge_updates.json"
+
+
+def _tr(text: str) -> str:
+    return QCoreApplication.translate("PhotoshopBridgeDialog", text)
+
+
+def consume_photoshop_bridge_update(
+    project_path: str,
+    apply_updates: Callable[[dict], int],
+) -> Optional[Tuple[str, str]]:
+    """Apply the changes Photoshop left for a project.
+
+    Returns None when nothing is pending, otherwise ``(state, message)``:
+
+    - ``applied``: the changes are in the project and the file is removed.
+    - ``waiting``: the file cannot be read yet; try again later.
+    - ``blocked``: the app cannot apply now (for example unsaved changes); the
+      file stays so a later check applies it.
+    - ``rejected``: the changes conflict with the project. The file is renamed
+      to ``*.rejected.json`` so it cannot block the next send from Photoshop.
+
+    >>> consume_photoshop_bridge_update("missing/project.json", lambda p: 0) is None
+    True
+    """
+    update_path = photoshop_bridge_update_path(project_path)
+    if not os.path.isfile(update_path):
+        return None
+    try:
+        with open(update_path, "r", encoding="utf-8") as update_file:
+            payload = json.load(update_file)
+    except (OSError, ValueError):
+        return "waiting", _tr("Waiting for Photoshop to finish writing changes...")
+
+    try:
+        updated_count = apply_updates(payload)
+    except PhotoshopBridgeUpdateError as error:
+        LOGGER.warning("Photoshop Bridge update was rejected: %s", error)
+        rejected_path = update_path[:-len(".json")] + ".rejected.json"
+        try:
+            os.replace(update_path, rejected_path)
+        except OSError as move_error:
+            LOGGER.warning("Could not set aside the rejected update: %s", move_error)
+        return "rejected", str(error)
+    except RuntimeError as error:
+        return "blocked", str(error)
+
+    try:
+        os.remove(update_path)
+    except OSError as error:
+        LOGGER.warning("Could not remove the applied Photoshop update: %s", error)
+    return "applied", _tr("Applied {count} Photoshop change(s).").format(
+        count=updated_count
+    )
 
 
 # Photoshop's install folder holds Presets/Scripts next to the .app bundle.
@@ -404,11 +484,10 @@ class PhotoshopBridgeDialog(QDialog):
     def __init__(self, parent=None, project=None) -> None:
         super().__init__(parent)
         self.project = project
-        self._bridge_session_id = ""
-        self._pending_update_path = ""
+        # Photoshop can send changes at any time, so check while visible.
         self._update_timer = QTimer(self)
         self._update_timer.setInterval(2000)
-        self._update_timer.timeout.connect(self._consume_bridge_update)
+        self._update_timer.timeout.connect(self.check_for_update)
         self.setObjectName("PhotoshopBridgeDialog")
         self.setWindowTitle(self.tr("Photoshop Bridge"))
         self.setMinimumWidth(480)
@@ -426,8 +505,7 @@ class PhotoshopBridgeDialog(QDialog):
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
         self._schedule_status_fit()
-        if self._pending_update_path:
-            self._update_timer.start()
+        self._update_timer.start()
 
     def hideEvent(self, event: QHideEvent) -> None:
         self._update_timer.stop()
@@ -549,7 +627,7 @@ class PhotoshopBridgeDialog(QDialog):
             "scripts", "export to photoshop", "BallonTranslator_PS_Bridge.jsx"
         )
 
-        source_ver = extract_jsx_version(source_jsx) or "2.5.4"
+        source_ver = extract_jsx_version(source_jsx) or "2.6.0"
         source_hash = get_file_md5(source_jsx)
 
         installed_jsx = os.path.join(scripts_dir, "BallonTranslator_PS_Bridge.jsx") if scripts_dir else None
@@ -590,7 +668,7 @@ class PhotoshopBridgeDialog(QDialog):
             self.install_btn.setText(self.tr("Install Script in Photoshop"))
 
         self._schedule_status_fit()
-        self._consume_bridge_update()
+        self.check_for_update()
 
     def _set_sync_status(self, message: str, color: str) -> None:
         self.sync_status_label.setText(message)
@@ -615,77 +693,27 @@ class PhotoshopBridgeDialog(QDialog):
         if needed > self.height():
             self.resize(self.width(), needed)
 
-    def _bridge_update_paths(self) -> List[str]:
-        paths = []
-        if self._pending_update_path:
-            paths.append(self._pending_update_path)
+    def check_for_update(self) -> None:
+        """Apply pending Photoshop changes and show the outcome."""
         project_path = getattr(self.project, "proj_path", "")
-        if project_path:
-            fallback_path = project_path + ".ps_bridge_updates.json"
-            if fallback_path not in paths:
-                paths.append(fallback_path)
-        return paths
-
-    def _consume_bridge_update(self) -> None:
-        for update_path in self._bridge_update_paths():
-            if not os.path.isfile(update_path):
-                continue
-            try:
-                with open(update_path, "r", encoding="utf-8") as update_file:
-                    payload = json.load(update_file)
-            except (OSError, ValueError):
-                # Photoshop may still be replacing the sidecar; retry instead
-                # of treating a partial read as bridge data.
-                self._set_sync_status(
-                    self.tr("Waiting for Photoshop to finish writing changes..."),
-                    "#FFA000",
-                )
-                return
-
-            session_id = (
-                payload.get("session_id") if isinstance(payload, dict) else None
-            )
-            if (
-                update_path == self._pending_update_path
-                and session_id != self._bridge_session_id
-            ):
-                self._update_timer.stop()
-                self._set_sync_status(
-                    self.tr("Ignored changes from an expired Photoshop session."),
-                    "#F44336",
-                )
-                return
-
-            apply_updates = getattr(
-                self.parent(), "apply_photoshop_bridge_updates", None
-            )
-            if not callable(apply_updates):
-                self._update_timer.stop()
+        if not project_path:
+            return
+        apply_updates = getattr(
+            self.parent(), "apply_photoshop_bridge_updates", None
+        )
+        if not callable(apply_updates):
+            if os.path.isfile(photoshop_bridge_update_path(project_path)):
                 self._set_sync_status(
                     self.tr("BallonsTranslator cannot apply Photoshop changes."),
                     "#F44336",
                 )
-                return
-            try:
-                updated_count = apply_updates(payload)
-                os.remove(update_path)
-            except (OSError, PhotoshopBridgeUpdateError, RuntimeError) as error:
-                self._update_timer.stop()
-                LOGGER.warning("Photoshop Bridge update was not applied: %s", error)
-                self._set_sync_status(str(error), "#F44336")
-                return
-
-            if update_path == self._pending_update_path:
-                self._pending_update_path = ""
-                self._bridge_session_id = ""
-                self._update_timer.stop()
-            self._set_sync_status(
-                self.tr("Applied {count} Photoshop change(s).").format(
-                    count=updated_count
-                ),
-                "#4CAF50",
-            )
             return
+        result = consume_photoshop_bridge_update(project_path, apply_updates)
+        if result is None:
+            return
+        state, message = result
+        colors = {"applied": "#4CAF50", "rejected": "#F44336"}
+        self._set_sync_status(message, colors.get(state, "#FFA000"))
 
     def on_install_script(self) -> None:
         ps_dir, scripts_dir, _ = get_photoshop_paths()
@@ -808,26 +836,17 @@ class PhotoshopBridgeDialog(QDialog):
                             self.project, "current_img", ""
                         ) or "",
                     }
-                session_id = uuid.uuid4().hex
-                update_path = os.path.join(
-                    tempfile.gettempdir(),
-                    f"bt_ps_bridge_updates_{session_id}.json",
-                )
                 context_file = os.path.join(tempfile.gettempdir(), "bt_ps_bridge_context.json")
                 ctx_data.update({
                     "project_path": os.path.abspath(
                         ctx_data["project_path"]
                     ).replace("\\", "/"),
                     "timestamp": time.time(),
-                    "session_id": session_id,
-                    "update_path": update_path.replace("\\", "/"),
                 })
                 context_tmp = context_file + ".tmp"
                 with open(context_tmp, "w", encoding="utf-8") as context_stream:
                     json.dump(ctx_data, context_stream, ensure_ascii=False, indent=2)
                 os.replace(context_tmp, context_file)
-                self._bridge_session_id = session_id
-                self._pending_update_path = update_path
                 context_written = True
             except Exception as ctx_err:
                 LOGGER.warning("Failed to prepare Photoshop Bridge context: %s", ctx_err)
@@ -857,7 +876,6 @@ class PhotoshopBridgeDialog(QDialog):
                 self.tr("Waiting for changes from Photoshop..."),
                 "#FFA000",
             )
-            self._update_timer.start()
 
     def on_open_folder(self):
         scripts_dir = os.path.join(

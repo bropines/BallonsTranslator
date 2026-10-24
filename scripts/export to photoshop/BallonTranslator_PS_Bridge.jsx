@@ -1,10 +1,10 @@
 // BallonTranslator_PS_Bridge.jsx
-// Version: 2.5.4
+// Version: 2.6.0
 // Multilingual Bidirectional Bridge between BallonsTranslator and Adobe Photoshop (CC 2019 - CC 2026+)
 
 #target photoshop
 
-var BT_BRIDGE_VERSION = "2.5.4";
+var BT_BRIDGE_VERSION = "2.6.0";
 
 
 
@@ -509,7 +509,8 @@ function writeBridgeUpdate(updateFile, payload) {
     if (updateFile.exists) {
         tempFile.remove();
         throw new Error(
-            "A previous Photoshop update is still waiting to be applied."
+            "BallonsTranslator has not applied the previous changes yet. " +
+            "Switch to BallonsTranslator with this project open, then send again."
         );
     }
     if (!tempFile.rename(updateFile.name)) {
@@ -539,14 +540,79 @@ function findFile(baseDir, relativeName) {
 }
 
 // ==========================================
+// Bridge state stored in the PSD (XMP)
+// ==========================================
+// An imported page remembers its project, page and the block values Photoshop
+// received. "Send Changes" reads them back, so it needs no project dialog
+// after a restart and compares against what Photoshop got, not the current
+// project file.
+var BT_XMP_NS = "http://github.com/dmMaze/BallonsTranslator/ns/psbridge/1.0/";
+
+function loadBridgeXmp() {
+    try {
+        if (!ExternalObject.AdobeXMPScript) {
+            ExternalObject.AdobeXMPScript = new ExternalObject("lib:AdobeXMPScript");
+        }
+    } catch (e) {
+        return false;
+    }
+    try {
+        XMPMeta.registerNamespace(BT_XMP_NS, "btbridge");
+    } catch (e2) {}
+    return true;
+}
+
+function readBridgeState(doc) {
+    if (!doc || !loadBridgeXmp()) return null;
+    try {
+        var xmp = new XMPMeta(doc.xmpMetadata.rawData);
+        var prop = xmp.getProperty(BT_XMP_NS, "state");
+        if (!prop) return null;
+        var state = JSON.parse(String(prop.value));
+        if (state && state.version === 1 && state.project_path &&
+            state.page && state.blocks instanceof Array) {
+            return state;
+        }
+    } catch (e) {}
+    return null;
+}
+
+function writeBridgeState(doc, state) {
+    if (!loadBridgeXmp()) return false;
+    try {
+        var xmp;
+        try {
+            xmp = new XMPMeta(doc.xmpMetadata.rawData);
+        } catch (parseErr) {
+            xmp = new XMPMeta();
+        }
+        xmp.setProperty(BT_XMP_NS, "state", JSON.stringify(state));
+        doc.xmpMetadata.rawData = xmp.serialize();
+        return true;
+    } catch (e) {
+        return false;
+    }
+}
+
+// The block values a change relies on. Must match
+// photoshop_bridge_block_snapshot() in ballontranslator/ui/ps_bridge_dialog.py.
+function getBlockBase(block) {
+    var fmt = block.fontformat;
+    return {
+        translation: block.translation || "",
+        font_size: (fmt && typeof fmt.font_size === "number") ? fmt.font_size : null,
+        text: block.text || [],
+        xyxy: block.xyxy || []
+    };
+}
+
+// ==========================================
 // Main Bridge Controller
 // ==========================================
 function runBallonTranslatorBridge() {
     // 1. Open project JSON (Check for Bridge Context from BallonsTranslator first)
     var jsonFile = null;
     var initialActivePage = null;
-    var bridgeUpdateFile = null;
-    var bridgeSessionId = "";
     try {
         var tempFolder = Folder.temp;
         var ctxFile = new File(tempFolder.fsName + "/bt_ps_bridge_context.json");
@@ -566,10 +632,6 @@ function runBallonTranslatorBridge() {
                             if (ctx.active_page) {
                                 initialActivePage = ctx.active_page;
                             }
-                            if (ctx.update_path) {
-                                bridgeUpdateFile = new File(ctx.update_path);
-                            }
-                            bridgeSessionId = ctx.session_id || "";
                         }
                     }
                 }
@@ -578,6 +640,15 @@ function runBallonTranslatorBridge() {
         }
     } catch (ctxErr) {}
 
+    // A page imported earlier knows its project.
+    if ((!jsonFile || !jsonFile.exists) && app.documents.length) {
+        var openState = readBridgeState(app.activeDocument);
+        if (openState && new File(openState.project_path).exists) {
+            jsonFile = new File(openState.project_path);
+            initialActivePage = openState.page;
+        }
+    }
+
     if (!jsonFile || !jsonFile.exists) {
         jsonFile = File.openDialog(
             BT_I18N.t("selectJsonPrompt") || "Select BallonsTranslator Project JSON (*.json)",
@@ -585,12 +656,6 @@ function runBallonTranslatorBridge() {
         );
     }
     if (!jsonFile || !jsonFile.exists) return;
-
-    if (!bridgeUpdateFile) {
-        bridgeUpdateFile = new File(
-            jsonFile.fsName + ".ps_bridge_updates.json"
-        );
-    }
 
     var projectDir = jsonFile.parent;
     var projectDirClean = getCleanPath(projectDir);
@@ -760,34 +825,50 @@ function runBallonTranslatorBridge() {
             return;
         }
         var activeDoc = app.activeDocument;
-        var decodedDocName = decodeURI(activeDoc.name);
-        var activeDocName = decodedDocName.replace(/\.[^\.]+$/, "");
-        
+        // Pages imported by this script carry their project, page and the
+        // block values Photoshop received. Older documents fall back to name
+        // matching and the project file as it is now.
+        var docState = readBridgeState(activeDoc);
+        var targetProjectPath = getCleanPath(jsonFile);
         var matchedPage = null;
-        for (var p = 0; p < pageNames.length; p++) {
-            if (decodedDocName === decodeURI(pageNames[p])) {
-                matchedPage = pageNames[p];
-                break;
-            }
-        }
-        if (!matchedPage) {
-            var stemMatches = [];
-            for (var stemP = 0; stemP < pageNames.length; stemP++) {
-                var rawPageName = decodeURI(pageNames[stemP])
-                    .replace(/\.[^\.]+$/, "");
-                if (activeDocName === rawPageName) {
-                    stemMatches.push(pageNames[stemP]);
+        var blockBases = [];
+        if (docState) {
+            targetProjectPath = docState.project_path;
+            matchedPage = docState.page;
+            blockBases = docState.blocks;
+        } else {
+            var decodedDocName = decodeURI(activeDoc.name);
+            var activeDocName = decodedDocName.replace(/\.[^\.]+$/, "");
+
+            for (var p = 0; p < pageNames.length; p++) {
+                if (decodedDocName === decodeURI(pageNames[p])) {
+                    matchedPage = pageNames[p];
+                    break;
                 }
             }
-            if (stemMatches.length === 1) {
-                matchedPage = stemMatches[0];
+            if (!matchedPage) {
+                var stemMatches = [];
+                for (var stemP = 0; stemP < pageNames.length; stemP++) {
+                    var rawPageName = decodeURI(pageNames[stemP])
+                        .replace(/\.[^\.]+$/, "");
+                    if (activeDocName === rawPageName) {
+                        stemMatches.push(pageNames[stemP]);
+                    }
+                }
+                if (stemMatches.length === 1) {
+                    matchedPage = stemMatches[0];
+                }
             }
-        }
-        if (!matchedPage) {
-            matchedPage = prompt("Document name doesn't match any page in JSON.\nEnter target page filename (e.g. " + pageNames[0] + "):", pageNames[0]);
-            if (!matchedPage || !projectData.pages[matchedPage]) {
-                alert("Export cancelled: Page not found in project.", "Warning");
-                return;
+            if (!matchedPage) {
+                matchedPage = prompt("Document name doesn't match any page in JSON.\nEnter target page filename (e.g. " + pageNames[0] + "):", pageNames[0]);
+                if (!matchedPage || !projectData.pages[matchedPage]) {
+                    alert("Export cancelled: Page not found in project.", "Warning");
+                    return;
+                }
+            }
+            var legacyBlocks = projectData.pages[matchedPage] || [];
+            for (var lb = 0; lb < legacyBlocks.length; lb++) {
+                blockBases.push(getBlockBase(legacyBlocks[lb]));
             }
         }
 
@@ -816,7 +897,6 @@ function runBallonTranslatorBridge() {
             return;
         }
 
-        var pageBlocks = projectData.pages[matchedPage] || [];
         var updates = [];
         var skippedLayers = [];
         var seenBlockIndices = {};
@@ -826,7 +906,7 @@ function runBallonTranslatorBridge() {
         for (var t = 0; t < textLayers.length; t++) {
             var tLayer = textLayers[t];
             var blockIndex = getBlockIndexFromLayerName(tLayer.name);
-            if (blockIndex < 0 || blockIndex >= pageBlocks.length) {
+            if (blockIndex < 0 || blockIndex >= blockBases.length) {
                 skippedLayers.push(tLayer.name);
                 continue;
             }
@@ -840,12 +920,14 @@ function runBallonTranslatorBridge() {
             }
             seenBlockIndices[blockIndex] = true;
 
-            var block = pageBlocks[blockIndex];
+            var base = blockBases[blockIndex];
+            var originalFontSize = (typeof base.font_size === "number") ?
+                base.font_size : null;
             var contents = tLayer.textItem.contents
                 .replace(/\r\n/g, "\n")
                 .replace(/\r/g, "\n");
             var fontSize = null;
-            if (block.fontformat) {
+            if (originalFontSize !== null) {
                 try {
                     var sizePt = tLayer.textItem.size.as("pt");
                     fontSize = sizePt * (activeDocRes / 72.0);
@@ -856,21 +938,21 @@ function runBallonTranslatorBridge() {
                 }
             }
 
-            var originalTranslation = block.translation || "";
-            var originalFontSize = block.fontformat ?
-                block.fontformat.font_size : null;
             // The import set this exact size, so only float noise separates an
             // untouched layer from it. Never round sizes the user did not change.
             if (
-                fontSize !== null && originalFontSize !== null &&
+                fontSize !== null &&
                 Math.abs(fontSize - originalFontSize) < 0.1
             ) {
                 fontSize = originalFontSize;
             } else if (fontSize !== null) {
                 fontSize = Math.round(fontSize * 100) / 100;
             }
+            var originalTranslation = (base.translation || "")
+                .replace(/\r\n/g, "\n")
+                .replace(/\r/g, "\n");
             if (
-                contents === originalTranslation.replace(/\r\n/g, "\n").replace(/\r/g, "\n") &&
+                contents === originalTranslation &&
                 (fontSize === null || fontSize === originalFontSize)
             ) {
                 continue;
@@ -880,15 +962,7 @@ function runBallonTranslatorBridge() {
                 block_index: blockIndex,
                 translation: contents,
                 font_size: fontSize,
-                base: {
-                    translation: originalTranslation,
-                    rich_text: block.rich_text || "",
-                    font_size: originalFontSize,
-                    text: block.text || [],
-                    xyxy: block.xyxy || [],
-                    bounding_rect: (typeof block._bounding_rect === "undefined") ?
-                        null : block._bounding_rect
-                }
+                base: base
             });
         }
 
@@ -898,29 +972,32 @@ function runBallonTranslatorBridge() {
         }
 
         try {
-            writeBridgeUpdate(bridgeUpdateFile, {
-                version: 1,
-                session_id: bridgeSessionId,
-                project_path: getCleanPath(jsonFile),
-                page: matchedPage,
-                block_count: pageBlocks.length,
-                updates: updates,
-                skipped_layers: skippedLayers,
-                timestamp: new Date().getTime() / 1000
-            });
-            for (var u = 0; u < updates.length; u++) {
-                var sent = updates[u];
-                var sentBlock = pageBlocks[sent.block_index];
-                if (sentBlock.translation !== sent.translation) {
-                    sentBlock.rich_text = "";
+            writeBridgeUpdate(
+                new File(targetProjectPath + ".ps_bridge_updates.json"),
+                {
+                    version: 1,
+                    project_path: targetProjectPath,
+                    page: matchedPage,
+                    block_count: blockBases.length,
+                    updates: updates,
+                    skipped_layers: skippedLayers,
+                    timestamp: new Date().getTime() / 1000
                 }
-                sentBlock.translation = sent.translation;
-                if (sent.font_size !== null && sentBlock.fontformat) {
-                    sentBlock.fontformat.font_size = sent.font_size;
+            );
+            // BallonsTranslator holds these values once it applies them, so the
+            // next send from this document compares against them.
+            if (docState) {
+                for (var u = 0; u < updates.length; u++) {
+                    var sentBase = blockBases[updates[u].block_index];
+                    sentBase.translation = updates[u].translation;
+                    if (updates[u].font_size !== null) {
+                        sentBase.font_size = updates[u].font_size;
+                    }
                 }
+                writeBridgeState(activeDoc, docState);
             }
-            // One sidecar represents one validated snapshot. Rerun the script
-            // after BallonsTranslator consumes it to send another set.
+            // One update file holds one validated set of changes. Run the
+            // script again after BallonsTranslator applies it to send more.
             btnExportBack.enabled = false;
             alert(BT_I18N.t("saveSuccess", { count: updates.length, page: matchedPage }), "Success");
         } catch (saveErr) {
@@ -1198,6 +1275,17 @@ function runBallonTranslatorBridge() {
                     tLayer.name = "#" + (bIdx + 1) + ": " + previewStr;
                 }
             }
+
+            var pageBases = [];
+            for (var pb = 0; pb < pageBlocks.length; pb++) {
+                pageBases.push(getBlockBase(pageBlocks[pb]));
+            }
+            writeBridgeState(doc, {
+                version: 1,
+                project_path: getCleanPath(jsonFile),
+                page: pageName,
+                blocks: pageBases
+            });
 
             processedCount++;
         }

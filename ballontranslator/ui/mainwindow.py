@@ -164,6 +164,7 @@ class MainWindow(mainwindow_cls):
         self._render_only = False
         self._render_global_format = None
         self._llm_context_dirty = False
+        self._ps_bridge_blocked_message = ""
 
         self.setupThread()
         self.setupUi()
@@ -928,6 +929,8 @@ class MainWindow(mainwindow_cls):
                     self.titleBar.maxBtn.setChecked(True)
         elif event.type() == QEvent.Type.ActivationChange:
             self.canvas.on_activation_changed()
+            if self.isActiveWindow():
+                self.check_photoshop_bridge_update()
 
         super().changeEvent(event)
     
@@ -1261,6 +1264,32 @@ class MainWindow(mainwindow_cls):
         else:
             self.ps_bridge_dialog.show()
 
+    def check_photoshop_bridge_update(self) -> None:
+        """Apply changes Photoshop sent while the user worked there."""
+        from .ps_bridge_dialog import (
+            consume_photoshop_bridge_update,
+            photoshop_bridge_update_path,
+        )
+
+        project_path = self.imgtrans_proj.proj_path
+        if not project_path or not osp.isfile(photoshop_bridge_update_path(project_path)):
+            return
+        dialog = getattr(self, "ps_bridge_dialog", None)
+        if dialog is not None and dialog.isVisible():
+            dialog.check_for_update()
+            return
+        result = consume_photoshop_bridge_update(
+            project_path, self.apply_photoshop_bridge_updates
+        )
+        if result is None or result[0] == "waiting":
+            return
+        state, message = result
+        # A blocked update stays pending; report it once, not on every focus.
+        if state == "blocked" and message == self._ps_bridge_blocked_message:
+            return
+        self._ps_bridge_blocked_message = message if state == "blocked" else ""
+        create_info_dialog(self.tr("Photoshop Bridge") + ": " + message)
+
     def prepare_photoshop_bridge_context(self) -> dict:
         """Save current app state before Photoshop reads the project snapshot."""
         from .ps_bridge_dialog import project_state_matches_disk
@@ -1294,8 +1323,8 @@ class MainWindow(mainwindow_cls):
         if self.canvas.projstate_unsaved:
             raise RuntimeError(
                 self.tr(
-                    "BallonsTranslator has unsaved changes. Save them, then check "
-                    "for the Photoshop update again."
+                    "Photoshop sent changes, but BallonsTranslator has unsaved "
+                    "changes. Save the project to apply them."
                 )
             )
         if not project_state_matches_disk(self.imgtrans_proj):
@@ -2100,6 +2129,10 @@ class MainWindow(mainwindow_cls):
             # sources; clearing one must not hide unsaved changes in the other.
             self.canvas.setProjSaveState(True)
             return
+        if not unsaved:
+            # Photoshop changes wait for a save. Defer so a save made while
+            # applying them finishes before the next check.
+            QTimer.singleShot(0, self.check_photoshop_bridge_update)
         save_state = self.tr('unsaved') if unsaved else self.tr('saved')
         self.titleBar.setTitleContent(save_state=save_state)
 
