@@ -12,7 +12,12 @@ import time
 from typing import Any, Callable, List, Optional, Tuple
 
 from qtpy.QtWidgets import (
+    QApplication,
+    QCheckBox,
     QDialog,
+    QHBoxLayout,
+    QLineEdit,
+    QSpinBox,
     QVBoxLayout,
     QGroupBox,
     QFormLayout,
@@ -24,6 +29,7 @@ from qtpy.QtWidgets import (
 from qtpy.QtCore import QCoreApplication, QObject, Qt, QTimer
 from qtpy.QtGui import QShowEvent
 
+from ballontranslator.utils.config import pcfg
 from ballontranslator.utils.logger import logger as LOGGER
 from ballontranslator.utils.message import create_info_dialog
 from ballontranslator.utils.proj_imgtrans import ProjImgTrans, TextBlkEncoder
@@ -667,7 +673,45 @@ class PhotoshopBridgeDialog(QDialog):
 
         layout.addWidget(actions_group)
 
-        # 3. Help info
+        # 3. Live connection for the Photoshop panel
+        live_group = QGroupBox(self.tr("Photoshop Panel Connection"))
+        live_group.setObjectName("PSLiveGroup")
+        live_layout = QFormLayout(live_group)
+        live_layout.setSpacing(8)
+        live_layout.setContentsMargins(12, 12, 12, 12)
+
+        self.live_checkbox = QCheckBox(
+            self.tr("Allow the Photoshop panel to connect (this computer only)")
+        )
+        live_layout.addRow(self.live_checkbox)
+
+        self.live_port_box = QSpinBox()
+        self.live_port_box.setRange(1024, 65535)
+        live_layout.addRow(QLabel(self.tr("Port:")), self.live_port_box)
+
+        token_row = QHBoxLayout()
+        self.live_token_edit = QLineEdit()
+        self.live_token_edit.setReadOnly(True)
+        token_row.addWidget(self.live_token_edit, 1)
+        copy_token_btn = QPushButton(self.tr("Copy"))
+        copy_token_btn.clicked.connect(self.on_copy_live_token)
+        token_row.addWidget(copy_token_btn)
+        new_token_btn = QPushButton(self.tr("New"))
+        new_token_btn.setToolTip(self.tr("Make a new token; paired panels must use the new one."))
+        new_token_btn.clicked.connect(self.on_new_live_token)
+        token_row.addWidget(new_token_btn)
+        live_layout.addRow(QLabel(self.tr("Pairing token:")), token_row)
+
+        self.live_status_label = QLabel()
+        self.live_status_label.setWordWrap(True)
+        live_layout.addRow(QLabel(self.tr("Status:")), self.live_status_label)
+        layout.addWidget(live_group)
+        self._sync_live_controls()
+        # Connect after the initial sync so building the dialog changes nothing.
+        self.live_checkbox.toggled.connect(self.on_live_toggled)
+        self.live_port_box.editingFinished.connect(self.on_live_port_changed)
+
+        # 4. Help info
         info_label = QLabel(
             self.tr(
                 "Tip: Inside Photoshop, run the bridge via File -> Scripts -> BallonTranslator_PS_Bridge.\n"
@@ -772,6 +816,49 @@ class PhotoshopBridgeDialog(QDialog):
         state, message = result
         colors = {"applied": "#4CAF50", "rejected": "#F44336"}
         self._set_sync_status(message, colors.get(state, "#FFA000"))
+
+    def _sync_live_controls(self, error: Optional[str] = None) -> None:
+        settings = pcfg.ps_bridge
+        self.live_checkbox.setChecked(settings.live_enabled)
+        self.live_port_box.setValue(settings.live_port)
+        self.live_token_edit.setText(settings.live_token)
+        server = getattr(self.parent(), "ps_bridge_server", None)
+        address = server.address if server is not None else None
+        if error:
+            text, color = error, "#F44336"
+        elif settings.live_enabled and address is not None:
+            text = self.tr("Listening on 127.0.0.1:{port}").format(port=address[1])
+            color = "#4CAF50"
+        else:
+            text, color = self.tr("Off"), "gray"
+        self.live_status_label.setText(text)
+        self.live_status_label.setStyleSheet(f"background: transparent; color: {color};")
+        self._schedule_status_fit()
+
+    def _apply_live_settings(self) -> None:
+        apply_settings = getattr(self.parent(), "apply_ps_bridge_live_settings", None)
+        error = apply_settings() if callable(apply_settings) else None
+        self._sync_live_controls(error)
+
+    def on_live_toggled(self, checked: bool) -> None:
+        pcfg.ps_bridge.live_enabled = checked
+        self._apply_live_settings()
+
+    def on_live_port_changed(self) -> None:
+        port = self.live_port_box.value()
+        if port == pcfg.ps_bridge.live_port:
+            return
+        pcfg.ps_bridge.live_port = port
+        self._apply_live_settings()
+
+    def on_copy_live_token(self) -> None:
+        QApplication.clipboard().setText(self.live_token_edit.text())
+
+    def on_new_live_token(self) -> None:
+        from .ps_bridge_server import new_bridge_token
+
+        pcfg.ps_bridge.live_token = new_bridge_token()
+        self._apply_live_settings()
 
     def on_install_script(self) -> None:
         ps_dir, scripts_dir, _ = get_photoshop_paths()

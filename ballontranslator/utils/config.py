@@ -397,6 +397,33 @@ class AutoTateChuYokoConfig(Config):
 
 
 @nested_dataclass
+class PhotoshopBridgeConfig(Config):
+    """Settings for the local server the Photoshop panel connects to.
+
+    >>> PhotoshopBridgeConfig(live_port=80).live_port
+    19871
+    """
+
+    live_enabled: bool = False
+    live_port: int = 19871
+    live_token: str = ''
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.live_enabled, bool):
+            LOGGER.warning('Discard invalid ps_bridge.live_enabled config.')
+            self.live_enabled = False
+        if (
+            type(self.live_port) is not int
+            or not 1024 <= self.live_port <= 65535
+        ):
+            LOGGER.warning('Discard invalid ps_bridge.live_port %r.', self.live_port)
+            self.live_port = 19871
+        if not isinstance(self.live_token, str):
+            LOGGER.warning('Discard invalid ps_bridge.live_token config.')
+            self.live_token = ''
+
+
+@nested_dataclass
 class ProgramConfig(Config):
 
     module: ModuleConfig = field(default_factory=lambda: ModuleConfig())
@@ -404,6 +431,7 @@ class ProgramConfig(Config):
     mirrors: NetworkMirrorsConfig = field(default_factory=lambda: NetworkMirrorsConfig())
     drawpanel: DrawPanelConfig = field(default_factory=lambda: DrawPanelConfig())
     auto_tate_chu_yoko: AutoTateChuYokoConfig = field(default_factory=AutoTateChuYokoConfig)
+    ps_bridge: PhotoshopBridgeConfig = field(default_factory=PhotoshopBridgeConfig)
     font_backend: Dict[str, str] = field(default_factory=lambda: {
         'windows': 'default', 'macos': 'default',
     })
@@ -553,6 +581,10 @@ class ProgramConfig(Config):
                             color,
                         )
                 config_dict['custom_colors'] = valid_colors
+
+        if 'ps_bridge' in config_dict and not isinstance(config_dict['ps_bridge'], dict):
+            LOGGER.warning('Discard invalid ps_bridge config: expected an object.')
+            config_dict.pop('ps_bridge')
 
         if 'module' in config_dict:
             module_cfg = config_dict['module']
