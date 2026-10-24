@@ -7,12 +7,21 @@ from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from qtpy.QtWidgets import QApplication
+from qtpy.QtGui import QFont, QFontDatabase
+from qtpy.QtWidgets import (
+    QApplication,
+    QFormLayout,
+    QProxyStyle,
+    QStyle,
+    QStyleFactory,
+    QWidget,
+)
 
 from ballontranslator.ui.mainwindow import MainWindow
 from ballontranslator.ui.ps_bridge_dialog import (
     PhotoshopBridgeDialog,
     PhotoshopBridgeUpdateError,
+    PhotoshopBridgeUpdatePoller,
     consume_photoshop_bridge_update,
     get_photoshop_paths,
     photoshop_bridge_block_snapshot,
@@ -247,41 +256,55 @@ class PhotoshopBridgeTest(unittest.TestCase):
             self.project.proj_path + ".ps_bridge_updates.rejected.json"
         ))
 
-    def test_returning_to_the_app_applies_changes_and_reports_a_block_once(
-        self,
-    ) -> None:
+    def _poller_window(self, apply_updates: Mock) -> QWidget:
+        window = QWidget()
+        window.imgtrans_proj = self.project
+        window.ps_bridge_dialog = None
+        window.apply_photoshop_bridge_updates = apply_updates
+        return window
+
+    def test_poller_applies_changes_and_reports_a_blocked_update_once(self) -> None:
         update_path = self._write_update(self._payload(0))
-        window = SimpleNamespace(
-            imgtrans_proj=self.project,
-            ps_bridge_dialog=None,
-            _ps_bridge_blocked_message="",
-            apply_photoshop_bridge_updates=Mock(
-                side_effect=RuntimeError("Save the project to apply them.")
-            ),
-            tr=lambda text: text,
+        window = self._poller_window(
+            Mock(side_effect=RuntimeError("Save the project to apply them."))
         )
-        with patch("ballontranslator.ui.mainwindow.create_info_dialog") as info:
-            MainWindow.check_photoshop_bridge_update(window)
-            MainWindow.check_photoshop_bridge_update(window)
+        poller = PhotoshopBridgeUpdatePoller(window)
+        with patch("ballontranslator.ui.ps_bridge_dialog.create_info_dialog") as info:
+            poller.check()
+            poller.check()
             self.assertEqual(info.call_count, 1)
             self.assertTrue(os.path.exists(update_path))
 
             window.apply_photoshop_bridge_updates = Mock(return_value=1)
-            MainWindow.check_photoshop_bridge_update(window)
+            poller.check()
 
         self.assertEqual(info.call_count, 2)
         self.assertIn("Applied 1", info.call_args.args[0])
         self.assertFalse(os.path.exists(update_path))
+        window.deleteLater()
 
-    def test_bridge_polls_only_while_visible(self) -> None:
-        dialog = PhotoshopBridgeDialog(project=self.project)
-        self.assertFalse(dialog._update_timer.isActive())
+    def test_poller_leaves_reporting_to_a_visible_bridge_window(self) -> None:
+        self._write_update(self._payload(0))
+        window = self._poller_window(Mock(return_value=1))
+        dialog = PhotoshopBridgeDialog(window, project=self.project)
+        window.ps_bridge_dialog = dialog
         dialog.show()
         self.app.processEvents()
-        self.assertTrue(dialog._update_timer.isActive())
+        with patch("ballontranslator.ui.ps_bridge_dialog.create_info_dialog") as info:
+            PhotoshopBridgeUpdatePoller(window).check()
+
+        info.assert_not_called()
+        self.assertIn("Applied 1", dialog.sync_status_label.text())
         dialog.hide()
-        self.assertFalse(dialog._update_timer.isActive())
-        dialog.deleteLater()
+        window.deleteLater()
+
+    def test_photoshop_soft_line_breaks_become_newlines(self) -> None:
+        payload = self._payload(0)
+        payload["updates"][0]["translation"] = "one\x03\x03two\rthree"
+
+        _, updates = validate_photoshop_bridge_updates(self.project, payload)
+
+        self.assertEqual(updates[0][1], "one\n\ntwo\nthree")
 
     def test_installer_copies_without_elevation_when_destination_is_writable(
         self,
@@ -382,9 +405,10 @@ class PhotoshopBridgeTest(unittest.TestCase):
         self.assertEqual(os.path.basename(command[-1]), "BallonTranslator_PS_Bridge.jsx")
         script = " ".join(command[1:-1])
         self.assertIn('tell application "Adobe Photoshop 2026"', script)
+        # Import dialogs can outlast the two-minute AppleEvent timeout.
+        self.assertIn("ignoring application responses", script)
         # The path is an argument, never spliced into the AppleScript source.
         self.assertNotIn(command[-1], script)
-        dialog._update_timer.stop()
         dialog.deleteLater()
 
     def test_windows_launch_keeps_the_run_switch(self) -> None:
@@ -399,7 +423,6 @@ class PhotoshopBridgeTest(unittest.TestCase):
 
         command = popen.call_args.args[0]
         self.assertEqual(command[:2], [exe_path, "-r"])
-        dialog._update_timer.stop()
         dialog.deleteLater()
 
     def test_status_that_wraps_after_showing_is_not_clipped(self) -> None:
@@ -422,6 +445,47 @@ class PhotoshopBridgeTest(unittest.TestCase):
         dialog.hide()
         dialog.deleteLater()
 
+    def test_status_is_not_clipped_with_macos_form_layout(self) -> None:
+        class MacFormStyle(QProxyStyle):
+            # macOS keeps form fields at their size hint by default.
+            def styleHint(self, hint, option=None, widget=None, return_data=None):
+                if hint == QStyle.StyleHint.SH_FormLayoutFieldGrowthPolicy:
+                    return QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint.value
+                return super().styleHint(hint, option, widget, return_data)
+
+        # Real glyph widths are needed; offscreen Qt may have no system fonts.
+        font_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "ballontranslator", "assets", "font_refresh", "Abel-Regular.ttf",
+        )
+        font_id = QFontDatabase.addApplicationFont(font_path)
+        style_name = self.app.style().name()
+        self.app.setStyle(MacFormStyle(QStyleFactory.create(style_name)))
+        try:
+            dialog = PhotoshopBridgeDialog(project=self.project)
+            dialog.setFont(QFont(QFontDatabase.applicationFontFamilies(font_id)[0], 13))
+            dialog.show()
+            self.app.processEvents()
+            label = dialog.sync_status_label
+            message = "Applied 1 Photoshop change(s) to page 0003.jpg now. " * 3
+            for length in range(20, len(message), 9):
+                dialog._set_sync_status(
+                    "Photoshop sent changes, but BallonsTranslator has unsaved "
+                    "changes. Save the project to apply them.",
+                    "#FFA000",
+                )
+                self.app.processEvents()
+                dialog._set_sync_status(message[:length], "#4CAF50")
+                self.app.processEvents()
+                self.app.processEvents()
+                self.assertGreaterEqual(
+                    label.height(), label.heightForWidth(label.width()), length
+                )
+            dialog.hide()
+            dialog.deleteLater()
+        finally:
+            self.app.setStyle(QStyleFactory.create(style_name))
+            QFontDatabase.removeApplicationFont(font_id)
 
 if __name__ == "__main__":
     unittest.main()

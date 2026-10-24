@@ -21,10 +21,11 @@ from qtpy.QtWidgets import (
     QMessageBox,
     QSizePolicy,
 )
-from qtpy.QtCore import QCoreApplication, Qt, QTimer
-from qtpy.QtGui import QHideEvent, QShowEvent
+from qtpy.QtCore import QCoreApplication, QObject, Qt, QTimer
+from qtpy.QtGui import QShowEvent
 
 from ballontranslator.utils.logger import logger as LOGGER
+from ballontranslator.utils.message import create_info_dialog
 from ballontranslator.utils.proj_imgtrans import ProjImgTrans, TextBlkEncoder
 from ballontranslator.utils.textblock import TextBlock
 
@@ -49,6 +50,21 @@ def _project_page_blocks(
     if blocks is None:
         blocks = getattr(project, "not_found_pages", {}).get(page_name)
     return blocks
+
+
+_LINE_BREAKS = re.compile(r"\r\n|[\r\x03]")
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+
+
+def normalize_bridge_text(text: str) -> str:
+    r"""Turn Photoshop line breaks into newlines and drop other control characters.
+
+    Photoshop ends paragraphs with CR and stores Shift+Enter breaks as ETX.
+
+    >>> normalize_bridge_text("one\x03two\rthree\x07")
+    'one\ntwo\nthree'
+    """
+    return _CONTROL_CHARS.sub("", _LINE_BREAKS.sub("\n", text))
 
 
 def photoshop_bridge_block_snapshot(block: TextBlock) -> dict:
@@ -242,7 +258,7 @@ def validate_photoshop_bridge_updates(
         validated.append(
             (
                 block,
-                translation.replace("\r\n", "\n").replace("\r", "\n"),
+                normalize_bridge_text(translation),
                 font_size,
             )
         )
@@ -306,6 +322,48 @@ def consume_photoshop_bridge_update(
     return "applied", _tr("Applied {count} Photoshop change(s).").format(
         count=updated_count
     )
+
+
+class PhotoshopBridgeUpdatePoller(QObject):
+    """Apply the changes Photoshop leaves for the open project.
+
+    Photoshop can send changes at any time, and checking one file is cheap, so
+    a short poll needs no file watcher bookkeeping when projects change. While
+    the bridge window is visible it reports the outcome itself.
+    """
+
+    INTERVAL_MS = 1500
+
+    def __init__(self, window: QObject) -> None:
+        super().__init__(window)
+        self._window = window
+        self._blocked_message = ""
+        self._timer = QTimer(self)
+        self._timer.setInterval(self.INTERVAL_MS)
+        self._timer.timeout.connect(self.check)
+        self._timer.start()
+
+    def check(self) -> None:
+        project_path = self._window.imgtrans_proj.proj_path
+        if not project_path or not os.path.isfile(
+            photoshop_bridge_update_path(project_path)
+        ):
+            return
+        dialog = getattr(self._window, "ps_bridge_dialog", None)
+        if dialog is not None and dialog.isVisible():
+            dialog.check_for_update()
+            return
+        result = consume_photoshop_bridge_update(
+            project_path, self._window.apply_photoshop_bridge_updates
+        )
+        if result is None or result[0] == "waiting":
+            return
+        state, message = result
+        # A blocked update stays pending until the user saves; say so once.
+        if state == "blocked" and message == self._blocked_message:
+            return
+        self._blocked_message = message if state == "blocked" else ""
+        create_info_dialog(_tr("Photoshop Bridge") + ": " + message)
 
 
 # Photoshop's install folder holds Presets/Scripts next to the .app bundle.
@@ -430,7 +488,9 @@ def photoshop_script_command(exe_path: str, jsx_path: str) -> List[str]:
     """Build the command that makes Photoshop run a JSX script.
 
     macOS has no ``-r`` switch, so AppleScript feeds the script text to
-    Photoshop; the path travels as an argument to avoid quoting issues.
+    Photoshop; the path travels as an argument to avoid quoting issues. The
+    script can wait on dialogs for minutes, so AppleScript does not wait for
+    Photoshop's reply (that times out after two minutes and logs an error).
 
     >>> photoshop_script_command('Photoshop.exe', 'b.jsx')  # doctest: +SKIP
     ['Photoshop.exe', '-r', 'b.jsx']
@@ -441,8 +501,10 @@ def photoshop_script_command(exe_path: str, jsx_path: str) -> List[str]:
     return [
         'osascript',
         '-e', 'on run argv',
-        '-e', f'tell application "{app_name}" to do javascript '
-              '(read (POSIX file (item 1 of argv)) as «class utf8»)',
+        '-e', 'set script_text to read (POSIX file (item 1 of argv)) as «class utf8»',
+        '-e', 'ignoring application responses',
+        '-e', f'tell application "{app_name}" to do javascript script_text',
+        '-e', 'end ignoring',
         '-e', 'end run',
         jsx_path,
     ]
@@ -484,10 +546,6 @@ class PhotoshopBridgeDialog(QDialog):
     def __init__(self, parent=None, project=None) -> None:
         super().__init__(parent)
         self.project = project
-        # Photoshop can send changes at any time, so check while visible.
-        self._update_timer = QTimer(self)
-        self._update_timer.setInterval(2000)
-        self._update_timer.timeout.connect(self.check_for_update)
         self.setObjectName("PhotoshopBridgeDialog")
         self.setWindowTitle(self.tr("Photoshop Bridge"))
         self.setMinimumWidth(480)
@@ -505,11 +563,6 @@ class PhotoshopBridgeDialog(QDialog):
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
         self._schedule_status_fit()
-        self._update_timer.start()
-
-    def hideEvent(self, event: QHideEvent) -> None:
-        self._update_timer.stop()
-        super().hideEvent(event)
 
     def init_ui(self):
         layout = QVBoxLayout(self)
@@ -546,6 +599,11 @@ class PhotoshopBridgeDialog(QDialog):
         status_group = QGroupBox(self.tr("Photoshop Integration Status"))
         status_group.setObjectName("PSStatusGroup")
         status_layout = QFormLayout(status_group)
+        # macOS keeps fields at their size hint by default, so a wrapped status
+        # stayed narrow while its height was computed for another width.
+        status_layout.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
+        )
         status_layout.setSpacing(8)
         status_layout.setContentsMargins(12, 12, 12, 12)
 
@@ -602,7 +660,7 @@ class PhotoshopBridgeDialog(QDialog):
         actions_layout.addWidget(self.install_btn)
 
         # Open Scripts folder in Explorer
-        self.open_folder_btn = QPushButton(self.tr("Open Scripts Folder in Explorer"))
+        self.open_folder_btn = QPushButton(self.tr("Show Scripts Folder"))
         self.open_folder_btn.setFixedHeight(30)
         self.open_folder_btn.clicked.connect(self.on_open_folder)
         actions_layout.addWidget(self.open_folder_btn)
@@ -627,7 +685,7 @@ class PhotoshopBridgeDialog(QDialog):
             "scripts", "export to photoshop", "BallonTranslator_PS_Bridge.jsx"
         )
 
-        source_ver = extract_jsx_version(source_jsx) or "2.6.0"
+        source_ver = extract_jsx_version(source_jsx) or "2.6.1"
         source_hash = get_file_md5(source_jsx)
 
         installed_jsx = os.path.join(scripts_dir, "BallonTranslator_PS_Bridge.jsx") if scripts_dir else None

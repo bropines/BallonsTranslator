@@ -1,10 +1,10 @@
 // BallonTranslator_PS_Bridge.jsx
-// Version: 2.6.0
+// Version: 2.6.1
 // Multilingual Bidirectional Bridge between BallonsTranslator and Adobe Photoshop (CC 2019 - CC 2026+)
 
 #target photoshop
 
-var BT_BRIDGE_VERSION = "2.6.0";
+var BT_BRIDGE_VERSION = "2.6.1";
 
 
 
@@ -241,6 +241,14 @@ var BT_I18N = {
             ru: "\u0412\u043d\u0438\u043c\u0430\u043d\u0438\u0435: \u0421\u043b\u0435\u0434\u0443\u044e\u0449\u0438\u0435 \u0448\u0440\u0438\u0444\u0442\u044b \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u044b \u0432 Photoshop (\u0438\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u043d \u0441\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u044b\u0439):\n{fonts}",
             zh: "\u6ce8\u610f\uff1a\u4ee5\u4e0b\u5b57\u4f53\u5728 Photoshop \u4e2d\u672a\u627e\u5230\uff0c\u5df2\u4f7f\u7528\u9ed8\u8ba4\u5b57\u4f53\u66ff\u4ee3\uff1a\n{fonts}",
             ko: "\ucc38\uace0: \ub2e4\uc74c \uae00\uaf34\uc744 Photoshop\uc5d0\uc11c \ucc3e\uc744 \uc218 \uc5c6\uc5b4 \uae30\ubcf8 \uae00\uaf34\ub85c \ub300\uccb4\ud588\uc2b5\ub2c8\ub2e4:\n{fonts}"
+        },
+        sendNote: {
+            en: "Send Changes sends text and font size. Font and box changes stay in Photoshop.",
+            ru: "\u00ab\u041e\u0442\u043f\u0440\u0430\u0432\u0438\u0442\u044c \u0438\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u044f\u00bb \u043f\u0435\u0440\u0435\u0434\u0430\u0451\u0442 \u0442\u0435\u043a\u0441\u0442 \u0438 \u0440\u0430\u0437\u043c\u0435\u0440 \u0448\u0440\u0438\u0444\u0442\u0430. \u0428\u0440\u0438\u0444\u0442 \u0438 \u0440\u0430\u043c\u043a\u0430 \u043e\u0441\u0442\u0430\u044e\u0442\u0441\u044f \u0442\u043e\u043b\u044c\u043a\u043e \u0432 Photoshop."
+        },
+        stateWarning: {
+            en: "The bridge state could not be stored in the document. Send Changes will ask for the project file.",
+            ru: "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0441\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c \u0434\u0430\u043d\u043d\u044b\u0435 \u043c\u043e\u0441\u0442\u0430 \u0432 \u0434\u043e\u043a\u0443\u043c\u0435\u043d\u0442. \u041f\u0440\u0438 \u043e\u0442\u043f\u0440\u0430\u0432\u043a\u0435 \u0438\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0439 \u0441\u043a\u0440\u0438\u043f\u0442 \u0441\u043f\u0440\u043e\u0441\u0438\u0442 \u0444\u0430\u0439\u043b \u043f\u0440\u043e\u0435\u043a\u0442\u0430."
         }
     },
 
@@ -594,6 +602,25 @@ function writeBridgeState(doc, state) {
     }
 }
 
+function findProjectNextTo(doc) {
+    try {
+        // Throws for a document that was never saved.
+        var candidates = doc.path.getFiles(function (f) {
+            var name = decodeURI(f.name);
+            return f instanceof File && /^imgtrans_.*\.json$/.test(name) &&
+                name.indexOf(".json.") === -1;
+        });
+        if (candidates.length === 1) return candidates[0];
+    } catch (e) {}
+    return null;
+}
+
+// Photoshop ends paragraphs with \r and stores Shift+Enter line breaks as
+// \u0003; BallonsTranslator uses \n for both.
+function normalizeLayerText(text) {
+    return String(text).replace(/\r\n/g, "\n").replace(/[\r\u0003]/g, "\n");
+}
+
 // The block values a change relies on. Must match
 // photoshop_bridge_block_snapshot() in ballontranslator/ui/ps_bridge_dialog.py.
 function getBlockBase(block) {
@@ -640,12 +667,19 @@ function runBallonTranslatorBridge() {
         }
     } catch (ctxErr) {}
 
-    // A page imported earlier knows its project.
+    // A page imported earlier knows its project. A page opened by hand from
+    // the project folder uses the only project file in that folder.
     if ((!jsonFile || !jsonFile.exists) && app.documents.length) {
         var openState = readBridgeState(app.activeDocument);
         if (openState && new File(openState.project_path).exists) {
             jsonFile = new File(openState.project_path);
             initialActivePage = openState.page;
+        } else {
+            var folderProject = findProjectNextTo(app.activeDocument);
+            if (folderProject) {
+                jsonFile = folderProject;
+                initialActivePage = decodeURI(app.activeDocument.name);
+            }
         }
     }
 
@@ -789,6 +823,9 @@ function runBallonTranslatorBridge() {
     var btnExportBack = grpActions.add("button", undefined, BT_I18N.t("btnSavePSD"));
     var btnCancel = grpActions.add("button", undefined, BT_I18N.t("btnCancel"), { name: "cancel" });
     var btnImport = grpActions.add("button", undefined, BT_I18N.t("btnImport"), { name: "ok" });
+    var lblSendNote = dlg.add("statictext", undefined, BT_I18N.t("sendNote"), { multiline: true });
+    // ScriptUI wraps multiline text only within an explicit size.
+    lblSendNote.preferredSize = [460, 34];
 
     // Dynamic UI re-translation handler
     cmbLang.onChange = function() {
@@ -816,6 +853,7 @@ function runBallonTranslatorBridge() {
         btnExportBack.text = BT_I18N.t("btnSavePSD");
         btnCancel.text = BT_I18N.t("btnCancel");
         btnImport.text = BT_I18N.t("btnImport");
+        lblSendNote.text = BT_I18N.t("sendNote");
     };
 
     // Reverse Sync handler
@@ -923,9 +961,7 @@ function runBallonTranslatorBridge() {
             var base = blockBases[blockIndex];
             var originalFontSize = (typeof base.font_size === "number") ?
                 base.font_size : null;
-            var contents = tLayer.textItem.contents
-                .replace(/\r\n/g, "\n")
-                .replace(/\r/g, "\n");
+            var contents = normalizeLayerText(tLayer.textItem.contents);
             var fontSize = null;
             if (originalFontSize !== null) {
                 try {
@@ -948,9 +984,7 @@ function runBallonTranslatorBridge() {
             } else if (fontSize !== null) {
                 fontSize = Math.round(fontSize * 100) / 100;
             }
-            var originalTranslation = (base.translation || "")
-                .replace(/\r\n/g, "\n")
-                .replace(/\r/g, "\n");
+            var originalTranslation = normalizeLayerText(base.translation || "");
             if (
                 contents === originalTranslation &&
                 (fontSize === null || fontSize === originalFontSize)
@@ -1043,6 +1077,7 @@ function runBallonTranslatorBridge() {
     app.displayDialogs = DialogModes.NO;
 
     var processedCount = 0;
+    var stateNotStored = false;
     var missingFonts = {};
 
     try {
@@ -1280,26 +1315,36 @@ function runBallonTranslatorBridge() {
             for (var pb = 0; pb < pageBlocks.length; pb++) {
                 pageBases.push(getBlockBase(pageBlocks[pb]));
             }
-            writeBridgeState(doc, {
+            if (!writeBridgeState(doc, {
                 version: 1,
                 project_path: getCleanPath(jsonFile),
                 page: pageName,
                 blocks: pageBases
-            });
+            })) {
+                stateNotStored = true;
+            }
 
             processedCount++;
         }
 
         if (processedCount > 0) {
             var msg = BT_I18N.t("importSuccess", { count: processedCount });
+            // Name each missing font once per Photoshop session.
+            var warnedFonts = $.getenv("BT_BRIDGE_WARNED_FONTS") || "|";
             var missingList = [];
             for (var mf in missingFonts) {
-                if (missingFonts.hasOwnProperty(mf)) {
+                if (missingFonts.hasOwnProperty(mf) &&
+                    warnedFonts.indexOf("|" + mf + "|") === -1) {
                     missingList.push("  - " + mf);
+                    warnedFonts += mf + "|";
                 }
             }
+            $.setenv("BT_BRIDGE_WARNED_FONTS", warnedFonts);
             if (missingList.length > 0) {
                 msg += "\n\n" + BT_I18N.t("fontWarning", { fonts: missingList.join("\n") });
+            }
+            if (stateNotStored) {
+                msg += "\n\n" + BT_I18N.t("stateWarning");
             }
             alert(msg, "Completed");
         }
