@@ -1290,9 +1290,11 @@ class MainWindow(mainwindow_cls):
             "active_page": project.current_img or "",
         }
 
-    def apply_photoshop_bridge_updates(self, payload: dict) -> int:
+    def apply_photoshop_bridge_updates(self, payload: dict) -> "BridgeApplyResult":
         """Validate and persist Photoshop changes through project ownership."""
         from .ps_bridge_dialog import (
+            BridgeApplyResult,
+            apply_bridge_runs,
             bridge_block_rect,
             project_state_matches_disk,
             validate_photoshop_bridge_updates,
@@ -1320,12 +1322,13 @@ class MainWindow(mainwindow_cls):
         changed = [
             update for update in updates
             if update.block.translation != update.translation
-            or update.font_size is not None
-            or update.font is not None
-            or update.box_delta is not None
+            or any(value is not None for value in (
+                update.font_size, update.font, update.box_delta, update.runs,
+                update.alignment, update.opacity, update.angle,
+            ))
         ]
         if not changed:
-            return 0
+            return BridgeApplyResult(0)
 
         old_values = [
             (
@@ -1335,47 +1338,63 @@ class MainWindow(mainwindow_cls):
                 update.block.fontformat.copy(),
                 None if update.block._bounding_rect is None else list(update.block._bounding_rect),
                 list(update.block.xyxy),
+                update.block.angle,
             )
             for update in changed
         ]
-        for update in changed:
-            block = update.block
-            if block.translation != update.translation:
-                block.translation = update.translation
-                # Rich HTML contains its own text and would otherwise hide the
-                # plain translation received from Photoshop.
-                block.rich_text = ""
-            if update.font_size is not None:
-                block.font_size = update.font_size
-            if update.font is not None:
-                block.font_family = update.font["family"]
-                block.fontformat.font_weight = 700 if update.font["bold"] else 400
-                block.fontformat.italic = update.font["italic"]
-                # Rich HTML carries its own font per run and would keep the old one.
-                block.rich_text = ""
-            if update.box_delta is not None:
-                left, top, right, bottom = update.box_delta
-                x, y, width, height = bridge_block_rect(block)
-                block._bounding_rect = [
-                    x + left,
-                    y + top,
-                    max(width + right - left, 1),
-                    max(height + bottom - top, 1),
-                ]
-                block.sync_xyxy_from_bounding_rect()
-
+        annotations_lost = 0
         current_page_updated = page_name == self.imgtrans_proj.current_img
         try:
+            for update in changed:
+                block = update.block
+                if update.runs is not None:
+                    # Validation leaves font and font_size out when runs come.
+                    annotations_lost += apply_bridge_runs(
+                        block, update.translation, update.runs
+                    )
+                elif block.translation != update.translation:
+                    block.translation = update.translation
+                    # Rich HTML contains its own text and would otherwise hide the
+                    # plain translation received from Photoshop.
+                    block.rich_text = ""
+                if update.font_size is not None:
+                    block.font_size = update.font_size
+                if update.font is not None:
+                    block.font_family = update.font["family"]
+                    block.fontformat.font_weight = 700 if update.font["bold"] else 400
+                    block.fontformat.italic = update.font["italic"]
+                    # Rich HTML carries its own font per run and would keep the old one.
+                    block.rich_text = ""
+                if update.alignment is not None:
+                    block.fontformat.alignment = update.alignment
+                if update.opacity is not None:
+                    block.fontformat.opacity = update.opacity
+                if update.angle is not None:
+                    block.angle = update.angle
+                if update.box_delta is not None:
+                    left, top, right, bottom = update.box_delta
+                    x, y, width, height = bridge_block_rect(block)
+                    block._bounding_rect = [
+                        x + left,
+                        y + top,
+                        max(width + right - left, 1),
+                        max(height + bottom - top, 1),
+                    ]
+                if update.box_delta is not None or update.angle is not None:
+                    # xyxy bounds the rotated box.
+                    block.sync_xyxy_from_bounding_rect()
+
             if current_page_updated:
                 self.st_manager.updateSceneTextitems()
             self.imgtrans_proj.save(keep_exist_as_backup=True)
         except Exception as error:
-            for block, translation, rich_text, fontformat, rect, xyxy in old_values:
+            for block, translation, rich_text, fontformat, rect, xyxy, angle in old_values:
                 block.translation = translation
                 block.rich_text = rich_text
                 block.fontformat = fontformat
                 block._bounding_rect = rect
                 block.xyxy = xyxy
+                block.angle = angle
             if current_page_updated:
                 self.st_manager.updateSceneTextitems()
             raise RuntimeError(
@@ -1387,7 +1406,7 @@ class MainWindow(mainwindow_cls):
         if current_page_updated:
             self.canvas.setProjSaveState(False)
             self.canvas.update_saved_undostep()
-        return len(changed)
+        return BridgeApplyResult(len(changed), annotations_lost)
 
     def on_path_reorder(self, checked: bool) -> None:
         if not checked:

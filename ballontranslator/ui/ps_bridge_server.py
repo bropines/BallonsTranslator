@@ -21,9 +21,9 @@ Endpoints, all under ``/api/v1/``:
 
 - ``POST pair``: ask the user to allow a panel; answers ``{"token": ...}``.
 - ``GET status``: the open project and its pages.
-- ``GET page?name=<page>``: the page's blocks as saved in the project, plus
-  ``bases``, the values a later update must still find
-  (``photoshop_bridge_block_snapshot``).
+- ``GET page?name=<page>``: the page's blocks as saved in the project (text,
+  box, rotation, look and character runs), plus ``bases``, the values a later
+  update must still find (``photoshop_bridge_block_snapshot``).
 - ``GET image?page=<page>&kind=original|inpainted|mask``: image bytes.
 - ``POST updates``: the payload the bridge script writes to the update file.
   Answers ``{"state": "applied" | "blocked" | "rejected", "message": ...}``.
@@ -50,13 +50,24 @@ from qtpy.QtWidgets import QMessageBox
 
 from ballontranslator.utils import shared
 from ballontranslator.utils.config import PS_BRIDGE_PORTS, pcfg
+from ballontranslator.utils.fontformat import LineSpacingType
 from ballontranslator.utils.logger import logger as LOGGER
 from ballontranslator.utils.message import create_info_dialog
+from ballontranslator.utils.text_effects import (
+    GlowEffect,
+    HollowEffect,
+    ShadowEffect,
+    StrokeEffect,
+    TextEffectStack,
+    effect_paint_fallback_color,
+)
 from .ps_bridge_dialog import (
     PhotoshopBridgeUpdateError,
     _project_page_blocks,
     _tr,
+    bridge_apply_message,
     bridge_block_rect,
+    bridge_text_runs,
     consume_photoshop_bridge_update,
     photoshop_bridge_block_snapshot,
     photoshop_bridge_update_path,
@@ -161,32 +172,165 @@ def bridge_status(window: Any) -> Dict[str, Any]:
     }
 
 
-def bridge_block_style(block: Any) -> Dict[str, Any]:
+def bridge_tracking(letter_spacing: float) -> int:
+    """Return Photoshop tracking (1/1000 em) for a BT letter-spacing multiplier.
+
+    BT widens each glyph's own advance by ``letter_spacing - 1``; Photoshop
+    adds one amount per character. The two agree for full-width (CJK) glyphs;
+    Latin text comes out about twice as wide as in the app.
+
+    >>> bridge_tracking(1.15)
+    150
+    """
+    return int(round((letter_spacing - 1) * 1000))
+
+
+def _first_active_effect(stack: TextEffectStack, kind: type, **values: str) -> Any:
+    # Effects are stored topmost first.
+    return next(
+        (
+            effect for effect in stack.effects
+            if isinstance(effect, kind)
+            and not effect.is_neutral()
+            and all(getattr(effect, key) == value for key, value in values.items())
+        ),
+        None,
+    )
+
+
+def _spread_percent(size: float, spread: float) -> float:
+    return spread / (size + spread) * 100 if size + spread > 0 else 0.0
+
+
+def bridge_stroke(stack: TextEffectStack, font_px: float) -> Optional[Dict[str, Any]]:
+    """Return the topmost visible stroke as a Photoshop Stroke style.
+
+    The app strokes glyph outlines with a pen ``font_px * width`` wide and
+    clips it by position: half of it shows outside or inside the letters.
+    Center is clipped like outside unless Hollow shows the whole pen.
+
+    >>> from ballontranslator.utils.text_effects import StrokeEffect
+    >>> bridge_stroke(TextEffectStack(effects=(StrokeEffect(width=0.2),)), 30)["width"]
+    3.0
+    """
+    stroke = _first_active_effect(stack, StrokeEffect)
+    if stroke is None:
+        return None
+    pen = font_px * stroke.width
+    position = stroke.position
+    if position == "center" and _first_active_effect(stack, HollowEffect) is None:
+        position = "outside"
+    return {
+        "width": pen if position == "center" else pen / 2,
+        "position": position,
+        "color": list(effect_paint_fallback_color(stroke.paint)),
+        "opacity": stroke.opacity,
+    }
+
+
+def bridge_shadow(stack: TextEffectStack, font_px: float) -> Optional[Dict[str, Any]]:
+    """Return the topmost visible drop shadow as a Photoshop Drop Shadow.
+
+    BT offsets the shadow by ``angle`` clockwise from +x on screen (y down).
+    Photoshop's angle is where the light comes from, counterclockwise from +x
+    (y up), and the shadow falls the other way: 120 puts the light at the top
+    left and the shadow at the bottom right. Both give the screen offset
+    ``(cos a, sin a)`` when ``ps = 180 - bt``. The result is in (-180, 180],
+    the range of Photoshop's Angle field.
+
+    >>> from ballontranslator.utils.text_effects import ShadowEffect
+    >>> shadow = ShadowEffect(angle=45, distance=0.1, blur=0.1, spread=0.1)
+    >>> bridge_shadow(TextEffectStack(effects=(shadow,)), 30)["angle"]
+    135.0
+    """
+    shadow = _first_active_effect(stack, ShadowEffect, shadow_type="drop")
+    if shadow is None:
+        return None
+    angle = (180 - shadow.angle) % 360
+    return {
+        "angle": angle - 360 if angle > 180 else angle,
+        "distance": shadow.distance * font_px,
+        # Photoshop's Size includes its Spread, which is a share of Size.
+        "size": (shadow.blur + shadow.spread) * font_px,
+        "spread": _spread_percent(shadow.blur, shadow.spread),
+        "color": list(effect_paint_fallback_color(shadow.paint)),
+        "opacity": shadow.opacity,
+    }
+
+
+def bridge_glow(stack: TextEffectStack, font_px: float) -> Optional[Dict[str, Any]]:
+    """Return the topmost visible outer glow as a Photoshop Outer Glow.
+
+    >>> from ballontranslator.utils.text_effects import GlowEffect
+    >>> glow = GlowEffect(size=0.3, spread=0.1)
+    >>> bridge_glow(TextEffectStack(effects=(glow,)), 10)["spread"]
+    25.0
+    """
+    glow = _first_active_effect(stack, GlowEffect, glow_type="outer")
+    if glow is None:
+        return None
+    return {
+        "size": (glow.size + glow.spread) * font_px,
+        "spread": _spread_percent(glow.size, glow.spread),
+        "color": list(effect_paint_fallback_color(glow.paint)),
+        "opacity": glow.opacity,
+    }
+
+
+def bridge_block_style(block: Any, runs: List[dict]) -> Dict[str, Any]:
     """Return how a block looks, in image pixels, for a panel to draw it.
+
+    Character values come from the first run (``runs`` from
+    ``bridge_text_runs``); effect sizes and leading scale with the largest
+    run, as the app draws them.
 
     >>> from ballontranslator.utils.textblock import TextBlock
     >>> block = TextBlock(xyxy=[0, 0, 10, 10])
     >>> block.font_size, block.stroke_width = 30, 0.2
-    >>> bridge_block_style(block)["stroke"]["width"]
-    3.0
+    >>> style = bridge_block_style(block, [])
+    >>> style["stroke"]["width"], style["leading"], style["tracking"]
+    (3.0, 36.0, 150)
     """
     fmt = block.fontformat
-    size = float(fmt.font_size)
-    stroke = None
-    if fmt.stroke_width > 0:
-        # The app strokes glyph outlines with a pen this wide relative to the
-        # font size; half of it shows outside the letters.
-        stroke = {"width": size * fmt.stroke_width / 2, "color": list(fmt.srgb)}
-    return {
+    first = runs[0] if runs else {
         "font_family": fmt.font_family,
-        "font_size": size,
-        "bold": int(fmt.font_weight or 400) >= 600,
+        "font_size": float(fmt.font_size),
+        "weight": int(fmt.font_weight or 400),
         "italic": bool(fmt.italic),
-        "color": list(fmt.frgb),
+        "underline": bool(fmt.underline),
+        "color": fmt.foreground_color(),
+        "letter_spacing": float(fmt.letter_spacing),
+    }
+    font_px = max((run["font_size"] for run in runs), default=first["font_size"])
+    spacing = float(fmt.line_spacing)
+    if fmt.line_spacing_type == LineSpacingType.Distance:
+        line_spacing = {"type": "distance", "value": spacing}
+        leading = font_px + 10 * spacing
+    else:
+        line_spacing = {"type": "proportional", "value": spacing}
+        leading = spacing * font_px
+    effects = fmt.text_effects
+    return {
+        "font_family": first["font_family"],
+        "font_size": first["font_size"],
+        "weight": first["weight"],
+        "bold": first["weight"] >= 600,
+        "italic": first["italic"],
+        "underline": first["underline"],
+        "color": list(first["color"]),
         # 0 left, 1 center, 2 right
-        "alignment": fmt.alignment,
+        "alignment": int(fmt.alignment),
         "vertical": bool(fmt.vertical),
-        "stroke": stroke,
+        "opacity": float(fmt.opacity),
+        "letter_spacing": first["letter_spacing"],
+        "tracking": bridge_tracking(first["letter_spacing"]),
+        "line_spacing": line_spacing,
+        # Baseline to baseline. BT measures a line by its ink height, about
+        # one em, so this is close but font dependent.
+        "leading": leading,
+        "stroke": bridge_stroke(effects, font_px),
+        "shadow": bridge_shadow(effects, font_px),
+        "glow": bridge_glow(effects, font_px),
     }
 
 
@@ -199,19 +343,26 @@ def bridge_page(window: Any, page_name: Optional[str]) -> Dict[str, Any]:
         raise BridgeRequestError(
             409, "Save the project in BallonsTranslator, then import again."
         )
+    page_blocks, bases = [], []
+    for block in blocks:
+        text, runs = bridge_text_runs(block)
+        page_blocks.append({
+            "translation": text,
+            "text": list(block.text),
+            "rect": [float(value) for value in bridge_block_rect(block)],
+            "angle": float(block.angle or 0),
+            "style": bridge_block_style(block, runs),
+            "runs": [
+                dict(run, tracking=bridge_tracking(run["letter_spacing"]))
+                for run in runs
+            ],
+        })
+        bases.append(photoshop_bridge_block_snapshot(block, runs))
     return {
         "project_path": project.proj_path,
         "page": page_name,
-        "blocks": [
-            {
-                "translation": block.translation,
-                "text": list(block.text),
-                "rect": [float(value) for value in bridge_block_rect(block)],
-                "style": bridge_block_style(block),
-            }
-            for block in blocks
-        ],
-        "bases": [photoshop_bridge_block_snapshot(block) for block in blocks],
+        "blocks": page_blocks,
+        "bases": bases,
     }
 
 
@@ -229,15 +380,16 @@ def bridge_image_path(window: Any, page_name: Optional[str], kind: str) -> str:
 
 def bridge_apply_updates(window: Any, payload: Any) -> Dict[str, Any]:
     try:
-        count = window.apply_photoshop_bridge_updates(payload)
+        result = window.apply_photoshop_bridge_updates(payload)
     except PhotoshopBridgeUpdateError as error:
         return {"state": "rejected", "message": str(error)}
     except RuntimeError as error:
         return {"state": "blocked", "message": str(error)}
     return {
         "state": "applied",
-        "applied": count,
-        "message": f"Applied {count} Photoshop change(s).",
+        "applied": result.applied,
+        "annotations_lost": result.annotations_lost,
+        "message": bridge_apply_message(result),
     }
 
 

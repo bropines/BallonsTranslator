@@ -14,6 +14,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from qtpy.QtWidgets import QApplication, QMessageBox, QWidget
 
 from ballontranslator.ui.ps_bridge_dialog import (
+    BridgeApplyResult,
     PhotoshopBridgeDialog,
     PhotoshopBridgeUpdateError,
     photoshop_bridge_block_snapshot,
@@ -107,7 +108,7 @@ class PhotoshopBridgeServerTest(BridgeRequests, unittest.TestCase):
         self.window = SimpleNamespace(
             imgtrans_proj=self.project,
             canvas=SimpleNamespace(projstate_unsaved=False),
-            apply_photoshop_bridge_updates=Mock(return_value=1),
+            apply_photoshop_bridge_updates=Mock(return_value=BridgeApplyResult(1)),
         )
         self.confirm_pairing = Mock(return_value=TOKEN)
         self.server = PhotoshopBridgeServer(self.window, self.confirm_pairing)
@@ -171,8 +172,17 @@ class PhotoshopBridgeServerTest(BridgeRequests, unittest.TestCase):
 
         self.assertEqual(status, 200)
         block = self.project.pages["page.png"][0]
-        self.assertEqual(data["blocks"][0]["translation"], "one")
+        page_block = data["blocks"][0]
+        self.assertEqual(page_block["translation"], "one")
+        self.assertEqual(page_block["angle"], 0.0)
+        self.assertEqual(
+            [(run["start"], run["end"], run["tracking"]) for run in page_block["runs"]],
+            [(0, 3, 150)],
+        )
+        self.assertEqual(page_block["style"]["font_size"], page_block["runs"][0]["font_size"])
         self.assertEqual(data["bases"], [photoshop_bridge_block_snapshot(block)])
+        # The base runs are the page runs without the derived tracking.
+        self.assertNotIn("tracking", data["bases"][0]["runs"][0])
 
     def test_unsaved_project_and_unknown_page_are_errors(self) -> None:
         status, _ = self.request_json("/api/v1/page?name=missing.png")

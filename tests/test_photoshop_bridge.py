@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from qtpy.QtGui import QFont, QFontDatabase
+from qtpy.QtGui import QColor, QFont, QFontDatabase, QTextCharFormat, QTextCursor
 from qtpy.QtWidgets import (
     QApplication,
     QFormLayout,
@@ -20,9 +20,15 @@ from qtpy.QtWidgets import (
 
 from ballontranslator.ui.mainwindow import MainWindow
 from ballontranslator.ui.ps_bridge_dialog import (
+    BridgeApplyResult,
     PhotoshopBridgeDialog,
     PanelInstaller,
     PhotoshopBridgeUpdateError,
+    _validated_bridge_runs,
+    apply_bridge_runs,
+    bridge_apply_message,
+    bridge_text_runs,
+    bridge_values_match,
     build_panel_package,
     bundled_panel_version,
     consume_photoshop_bridge_update,
@@ -33,9 +39,26 @@ from ballontranslator.ui.ps_bridge_dialog import (
     project_state_matches_disk,
     validate_photoshop_bridge_updates,
 )
-from ballontranslator.ui.ps_bridge_server import PhotoshopBridgeService
+from ballontranslator.ui.ps_bridge_server import (
+    PhotoshopBridgeService,
+    bridge_block_style,
+    bridge_shadow,
+    bridge_stroke,
+    bridge_tracking,
+)
+from ballontranslator.ui.text_engine.annotations import apply_emphasis, to_rich_text_html
+from ballontranslator.ui.text_engine.pipeline_formatting import _load_text_block_document
 from ballontranslator.utils.config import PS_BRIDGE_PORTS
+from ballontranslator.utils.fontformat import LineSpacingType, px2pt
 from ballontranslator.utils.proj_imgtrans import ProjImgTrans, TextBlkEncoder
+from ballontranslator.utils.text_effects import (
+    GlowEffect,
+    HollowEffect,
+    ShadowEffect,
+    SolidPaint,
+    StrokeEffect,
+    TextEffectStack,
+)
 from ballontranslator.utils.textblock import TextBlock
 
 
@@ -109,9 +132,9 @@ class PhotoshopBridgeTest(unittest.TestCase):
             tr=lambda text: text,
         )
 
-        count = MainWindow.apply_photoshop_bridge_updates(fake_window, payload)
+        result = MainWindow.apply_photoshop_bridge_updates(fake_window, payload)
 
-        self.assertEqual(count, 2)
+        self.assertEqual(result, BridgeApplyResult(2, 0))
         self.assertEqual(self.project.pages["page.png"][0].translation, "updated 1")
         self.assertEqual(self.project.pages["page.png"][0].rich_text, "")
         self.assertEqual(self.project.pages["page.png"][1].translation, "")
@@ -181,9 +204,9 @@ class PhotoshopBridgeTest(unittest.TestCase):
             tr=lambda text: text,
         )
 
-        count = MainWindow.apply_photoshop_bridge_updates(fake_window, payload)
+        result = MainWindow.apply_photoshop_bridge_updates(fake_window, payload)
 
-        self.assertEqual(count, 1)
+        self.assertEqual(result.applied, 1)
         self.assertEqual(block.translation, "three")
         self.assertEqual(block.font_family, "Bebas Neue")
         self.assertEqual((block.fontformat.font_weight, block.fontformat.italic), (700, False))
@@ -274,7 +297,7 @@ class PhotoshopBridgeTest(unittest.TestCase):
 
     def test_applied_update_file_is_removed(self) -> None:
         update_path = self._write_update(self._payload(0))
-        apply_updates = Mock(return_value=1)
+        apply_updates = Mock(return_value=BridgeApplyResult(1))
 
         state, message = consume_photoshop_bridge_update(
             self.project.proj_path, apply_updates
@@ -299,9 +322,9 @@ class PhotoshopBridgeTest(unittest.TestCase):
         payload["updates"][0]["base"]["translation"] = "something else"
         update_path = self._write_update(payload)
 
-        def apply_updates(payload: dict) -> int:
+        def apply_updates(payload: dict) -> BridgeApplyResult:
             validate_photoshop_bridge_updates(self.project, payload)
-            return 1
+            return BridgeApplyResult(1)
 
         state, message = consume_photoshop_bridge_update(
             self.project.proj_path, apply_updates
@@ -333,7 +356,9 @@ class PhotoshopBridgeTest(unittest.TestCase):
             self.assertEqual(info.call_count, 1)
             self.assertTrue(os.path.exists(update_path))
 
-            window.apply_photoshop_bridge_updates = Mock(return_value=1)
+            window.apply_photoshop_bridge_updates = Mock(
+                return_value=BridgeApplyResult(1)
+            )
             service.check_updates()
 
         self.assertEqual(info.call_count, 2)
@@ -343,7 +368,7 @@ class PhotoshopBridgeTest(unittest.TestCase):
 
     def test_poller_leaves_reporting_to_a_visible_bridge_window(self) -> None:
         self._write_update(self._payload(0))
-        window = self._poller_window(Mock(return_value=1))
+        window = self._poller_window(Mock(return_value=BridgeApplyResult(1)))
         dialog = PhotoshopBridgeDialog(window, project=self.project)
         window.ps_bridge_dialog = dialog
         dialog.show()
@@ -592,6 +617,352 @@ class PhotoshopBridgeTest(unittest.TestCase):
         finally:
             self.app.setStyle(QStyleFactory.create(style_name))
             QFontDatabase.removeApplicationFont(font_id)
+
+def _styled_block(translation: str, styles: list, **values) -> TextBlock:
+    """Return a block whose rich text BT's own document code wrote.
+
+    ``styles`` holds ``(start, end, char_format_modifier)`` in UTF-16 offsets.
+    """
+    block = TextBlock(xyxy=[0, 0, 100, 50], text=["source"],
+                      translation=translation, _bounding_rect=[0, 0, 100, 50], **values)
+    block.font_size = 30
+    block.font_family = "Arial"
+    document = _load_text_block_document(block)
+    cursor = QTextCursor(document)
+    for start, end, modifier in styles:
+        cursor.setPosition(start)
+        cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+        if callable(modifier):
+            modifier(cursor)
+        else:
+            cursor.mergeCharFormat(modifier)
+    block.rich_text = to_rich_text_html(
+        document,
+        line_spacing_fallback=block.fontformat.line_spacing,
+        line_spacing_type_fallback=block.fontformat.line_spacing_type,
+    )
+    return block
+
+
+def _char_format(size_px=None, bold=None, color=None) -> QTextCharFormat:
+    char_format = QTextCharFormat()
+    if size_px is not None:
+        char_format.setFontPointSize(px2pt(size_px))
+    if bold is not None:
+        char_format.setFontWeight(QFont.Weight.Bold if bold else QFont.Weight.Normal)
+    if color is not None:
+        char_format.setForeground(QColor(*color))
+    return char_format
+
+
+class PhotoshopBridgeStyleTest(unittest.TestCase):
+    """Protocol v2: text styles, alignment, opacity and rotation."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.project = ProjImgTrans()
+        self.project.directory = self.temp_dir.name
+        self.project.proj_path = os.path.join(self.temp_dir.name, "project.json")
+        self.project.current_img = "page.png"
+        # "Hello 😀 world" / "second": Hello is 48 px, bold and red.
+        self.block = _styled_block(
+            "Hello \U0001F600 world\nsecond",
+            [(0, 5, _char_format(48, True, (200, 0, 0)))],
+        )
+        self.plain = TextBlock(xyxy=[200, 0, 300, 50], text=["plain"],
+                               translation="plain", _bounding_rect=[200, 0, 100, 50])
+        self.project.pages = {"page.png": [self.block, self.plain]}
+        self.project.save()
+        self.window = SimpleNamespace(
+            imgtrans_proj=self.project,
+            canvas=SimpleNamespace(
+                projstate_unsaved=False,
+                setProjSaveState=Mock(),
+                update_saved_undostep=Mock(),
+            ),
+            st_manager=SimpleNamespace(updateSceneTextitems=Mock()),
+            tr=lambda text: text,
+        )
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def _payload(self, index: int = 0, **changes) -> dict:
+        block = self.project.pages["page.png"][index]
+        update = {
+            "block_index": index,
+            "translation": block.translation,
+            "font_size": None,
+            "base": photoshop_bridge_block_snapshot(block),
+        }
+        update.update(changes)
+        return {
+            "version": 1,
+            "project_path": self.project.proj_path,
+            "page": "page.png",
+            "block_count": 2,
+            "updates": [update],
+        }
+
+    def _update_runs(self, block: TextBlock) -> list:
+        return [
+            {
+                "start": run["start"],
+                "end": run["end"],
+                "font": {"family": run["font_family"], "bold": run["bold"],
+                         "italic": run["italic"]},
+                "font_size": run["font_size"],
+                "color": run["color"],
+                "underline": run["underline"],
+            }
+            for run in bridge_text_runs(block)[1]
+        ]
+
+    def test_rich_text_runs_use_pixels_and_utf16_offsets(self) -> None:
+        text, runs = bridge_text_runs(self.block)
+
+        self.assertEqual(text, "Hello \U0001F600 world\nsecond")
+        # The emoji is two UTF-16 units; the paragraph break joins the run before it.
+        self.assertEqual([(run["start"], run["end"]) for run in runs], [(0, 5), (5, 21)])
+        self.assertEqual(
+            [(run["font_size"], run["weight"], run["bold"], run["color"]) for run in runs],
+            [(48.0, 700, True, [200, 0, 0]), (30.0, 400, False, [0, 0, 0])],
+        )
+        self.assertEqual(runs[1]["font_family"], "Arial")
+        self.assertEqual(bridge_text_runs(self.plain)[1][0]["end"], 5)
+
+    def test_runs_survive_a_round_trip_through_photoshop(self) -> None:
+        runs_before = bridge_text_runs(self.block)[1]
+
+        lost = apply_bridge_runs(
+            self.block, self.block.translation, self._update_runs(self.block)
+        )
+
+        self.assertFalse(lost)
+        self.assertTrue(bridge_values_match(bridge_text_runs(self.block)[1], runs_before))
+        # The block-level format follows the first run and the smallest size.
+        self.assertEqual(self.block.font_size, 30.0)
+        self.assertEqual(self.block.fontformat.frgb, [200, 0, 0])
+
+    def test_unchanged_runs_are_not_written(self) -> None:
+        payload = self._payload(runs=self._update_runs(self.block))
+
+        _, updates = validate_photoshop_bridge_updates(self.project, payload)
+        result = MainWindow.apply_photoshop_bridge_updates(self.window, payload)
+
+        self.assertIsNone(updates[0].runs)
+        self.assertEqual(result, BridgeApplyResult(0, 0))
+
+    def test_changed_runs_alignment_opacity_and_angle_are_applied(self) -> None:
+        runs = self._update_runs(self.block)
+        runs[1].update(color=[0, 0, 255], font_size=36.0)
+        runs[1]["font"]["italic"] = True
+        payload = self._payload(runs=runs, alignment=2, opacity=0.5, angle=30.0)
+
+        result = MainWindow.apply_photoshop_bridge_updates(self.window, payload)
+
+        self.assertEqual(result, BridgeApplyResult(1, 0))
+        after = bridge_text_runs(self.block)[1]
+        self.assertEqual((after[0]["font_size"], after[0]["color"]), (48.0, [200, 0, 0]))
+        self.assertEqual(
+            (after[1]["font_size"], after[1]["color"], after[1]["italic"]),
+            (36.0, [0, 0, 255], True),
+        )
+        fmt = self.block.fontformat
+        self.assertEqual((fmt.alignment, fmt.opacity, self.block.angle), (2, 0.5, 30.0))
+        self.assertEqual(self.block.font_size, 36.0)
+        # The detection box bounds the rotated text box.
+        self.assertNotEqual(self.block.xyxy, [0, 0, 100, 50])
+        with open(self.project.proj_path, "r", encoding="utf-8") as project_file:
+            saved = json.load(project_file)["pages"]["page.png"][0]
+        self.assertEqual((saved["angle"], saved["fontformat"]["alignment"]), (30.0, 2))
+
+    def test_new_text_keeps_photoshop_styles_and_reports_lost_annotations(self) -> None:
+        def emphasis(cursor: QTextCursor) -> None:
+            apply_emphasis(cursor, "filled dot", "over right")
+
+        block = _styled_block("ab", [(0, 2, emphasis)])
+        self.project.pages["page.png"][0] = block
+        self.project.save()
+        runs = self._update_runs(block)
+        runs[0]["end"] = 3
+        runs[0]["color"] = [10, 20, 30]
+        payload = self._payload(translation="abc", runs=runs)
+
+        result = MainWindow.apply_photoshop_bridge_updates(self.window, payload)
+
+        self.assertEqual(result, BridgeApplyResult(1, 1))
+        self.assertIn("1 block(s)", bridge_apply_message(result))
+        self.assertEqual(block.translation, "abc")
+        self.assertEqual(bridge_text_runs(block)[1][0]["color"], [10, 20, 30])
+        self.assertNotIn("text-emphasis", block.rich_text)
+
+    def test_run_offsets_inside_an_emoji_or_with_gaps_are_rejected(self) -> None:
+        runs = self._update_runs(self.block)
+        valid = _validated_bridge_runs(runs, self.block.translation, self.block.translation)
+        self.assertEqual([(run["start"], run["end"]) for run in valid], [(0, 5), (5, 21)])
+
+        split = [dict(runs[0], end=7), dict(runs[1], start=7)]
+        gap = [dict(runs[0], end=4), dict(runs[1])]
+        for bad in (split, gap, runs[:1]):
+            with self.assertRaisesRegex(PhotoshopBridgeUpdateError, "invalid text styles"):
+                validate_photoshop_bridge_updates(self.project, self._payload(runs=bad))
+
+    def test_photoshop_line_breaks_inside_runs_keep_offsets_aligned(self) -> None:
+        runs = self._update_runs(self.block)
+        # Photoshop sends CR between paragraphs and ETX for soft breaks.
+        raw = "Hello \U0001F600 world\r\nsec\x03ond"
+        runs[1]["end"] = 23
+
+        _, updates = validate_photoshop_bridge_updates(
+            self.project, self._payload(translation=raw, runs=runs)
+        )
+
+        self.assertEqual(updates[0].translation, "Hello \U0001F600 world\nsec\nond")
+        self.assertEqual([(run["start"], run["end"]) for run in updates[0].runs],
+                         [(0, 5), (5, 22)])
+
+    def test_each_new_field_conflicts_with_an_edit_made_in_the_app(self) -> None:
+        fmt = self.block.fontformat
+        cases = (
+            ("alignment", 2, fmt, "alignment", 1, "alignment"),
+            ("opacity", 0.5, fmt, "opacity", 0.8, "opacity"),
+            ("angle", 15.0, self.block, "angle", 5.0, "rotation"),
+        )
+        for key, value, owner, attribute, app_value, name in cases:
+            with self.subTest(key=key):
+                payload = self._payload(**{key: value})
+                validate_photoshop_bridge_updates(self.project, payload)
+                old_value = getattr(owner, attribute)
+                setattr(owner, attribute, app_value)
+                try:
+                    with self.assertRaisesRegex(PhotoshopBridgeUpdateError, rf"\({name}\)"):
+                        validate_photoshop_bridge_updates(self.project, payload)
+                finally:
+                    setattr(owner, attribute, old_value)
+
+    def test_runs_conflict_with_style_or_text_edits_made_in_the_app(self) -> None:
+        runs = self._update_runs(self.block)
+        runs[0]["color"] = [0, 255, 0]
+        payload = self._payload(runs=runs)
+
+        rich_text = self.block.rich_text
+        self.block.rich_text = _styled_block(
+            self.block.translation, [(0, 5, _char_format(20))]
+        ).rich_text
+        with self.assertRaisesRegex(PhotoshopBridgeUpdateError, r"\(text style\)"):
+            validate_photoshop_bridge_updates(self.project, payload)
+
+        # New runs are offsets into the text Photoshop received.
+        self.block.rich_text = rich_text
+        self.block.translation = "edited in the app"
+        with self.assertRaisesRegex(PhotoshopBridgeUpdateError, r"\(text\)"):
+            validate_photoshop_bridge_updates(self.project, payload)
+
+    def test_fields_sent_unchanged_may_differ_in_the_app(self) -> None:
+        payload = self._payload(alignment=0, opacity=1.0, angle=0.0)
+        self.block.fontformat.alignment = 2
+        self.block.angle = 45
+
+        _, updates = validate_photoshop_bridge_updates(self.project, payload)
+
+        self.assertEqual(updates[0][5:], (None, None, None, None))
+
+    def test_payload_without_the_new_fields_still_applies(self) -> None:
+        payload = self._payload(1, translation="changed", font_size=40)
+        base = payload["updates"][0]["base"]
+        for key in ("runs", "alignment", "opacity", "angle"):
+            del base[key]
+
+        result = MainWindow.apply_photoshop_bridge_updates(self.window, payload)
+
+        self.assertEqual(result.applied, 1)
+        self.assertEqual((self.plain.translation, self.plain.font_size), ("changed", 40))
+
+        # A new field cannot be checked against a base that lacks it.
+        payload = self._payload(1, alignment=2)
+        del payload["updates"][0]["base"]["alignment"]
+        with self.assertRaisesRegex(PhotoshopBridgeUpdateError, r"\(alignment\)"):
+            validate_photoshop_bridge_updates(self.project, payload)
+
+    def test_failed_save_restores_every_changed_field(self) -> None:
+        rich_text, xyxy = self.block.rich_text, list(self.block.xyxy)
+        runs = self._update_runs(self.block)
+        runs[0]["color"] = [1, 2, 3]
+        payload = self._payload(
+            translation="Hello", runs=[dict(runs[0], end=5)], alignment=2,
+            opacity=0.3, angle=20.0,
+        )
+
+        with patch.object(self.project, "save", side_effect=OSError("disk full")):
+            with self.assertRaisesRegex(RuntimeError, "disk full"):
+                MainWindow.apply_photoshop_bridge_updates(self.window, payload)
+
+        fmt = self.block.fontformat
+        self.assertEqual((self.block.rich_text, self.block.xyxy), (rich_text, xyxy))
+        self.assertEqual((fmt.alignment, fmt.opacity, self.block.angle), (0, 1.0, 0))
+        self.assertEqual(self.block.translation, "Hello \U0001F600 world\nsecond")
+
+    def test_style_converts_effects_to_photoshop_terms(self) -> None:
+        runs = bridge_text_runs(self.block)[1]
+        fmt = self.block.fontformat
+        fmt.text_effects = TextEffectStack(effects=(
+            StrokeEffect(enabled=False, width=0.5),
+            StrokeEffect(width=0.1, position="inside", opacity=0.5,
+                         paint=SolidPaint((255, 255, 255))),
+            ShadowEffect(shadow_type="inner", angle=10),
+            ShadowEffect(angle=90, distance=0.1, blur=0.3, spread=0.1, opacity=0.75),
+            GlowEffect(size=0.2, spread=0.2, paint=SolidPaint((0, 255, 0))),
+        ))
+
+        style = bridge_block_style(self.block, runs)
+
+        # Effect sizes follow the largest run (48 px); the font follows the first.
+        self.assertEqual((style["font_size"], style["weight"], style["tracking"]), (48.0, 700, 150))
+        stroke = style["stroke"]
+        self.assertAlmostEqual(stroke.pop("width"), 2.4)
+        self.assertEqual(stroke, {"position": "inside", "color": [255, 255, 255], "opacity": 0.5})
+        shadow = style["shadow"]
+        self.assertEqual((shadow["angle"], shadow["opacity"]), (90.0, 0.75))
+        self.assertAlmostEqual(shadow["distance"], 4.8)
+        self.assertAlmostEqual(shadow["size"], 19.2)
+        self.assertAlmostEqual(shadow["spread"], 25.0)
+        self.assertAlmostEqual(style["glow"]["size"], 19.2)
+        self.assertEqual((style["glow"]["spread"], style["glow"]["color"]), (50.0, [0, 255, 0]))
+        self.assertAlmostEqual(style["leading"], 1.2 * 48)
+
+        fmt.line_spacing, fmt.line_spacing_type = 0.5, LineSpacingType.Distance
+        style = bridge_block_style(self.block, runs)
+        self.assertEqual(style["line_spacing"], {"type": "distance", "value": 0.5})
+        self.assertEqual(style["leading"], 53.0)
+
+    def test_stroke_position_and_shadow_angle_conversions(self) -> None:
+        def stroke(position: str, *extra) -> dict:
+            stack = TextEffectStack(effects=(StrokeEffect(width=0.2, position=position), *extra))
+            return bridge_stroke(stack, 30)
+
+        self.assertEqual((stroke("outside")["position"], stroke("outside")["width"]), ("outside", 3.0))
+        self.assertEqual(stroke("inside")["width"], 3.0)
+        # Without Hollow the app clips a center stroke to the outside half.
+        self.assertEqual((stroke("center")["position"], stroke("center")["width"]), ("outside", 3.0))
+        hollow = stroke("center", HollowEffect())
+        self.assertEqual((hollow["position"], hollow["width"]), ("center", 6.0))
+        self.assertIsNone(bridge_stroke(TextEffectStack(), 30))
+
+        # BT: shadow direction clockwise from +x. Photoshop: light direction,
+        # counterclockwise; the shadow falls opposite the light.
+        for bt_angle, ps_angle in ((0, 180.0), (90, 90.0), (180, 0.0), (270, -90.0), (315, -135.0)):
+            stack = TextEffectStack(effects=(ShadowEffect(angle=bt_angle),))
+            self.assertEqual(bridge_shadow(stack, 30)["angle"], ps_angle, bt_angle)
+        stack = TextEffectStack(effects=(ShadowEffect(blur=0, spread=0),))
+        self.assertEqual(bridge_shadow(stack, 30)["spread"], 0.0)
+        self.assertEqual(bridge_tracking(1.0), 0)
+        self.assertEqual(bridge_tracking(0.9), -100)
+
 
 if __name__ == "__main__":
     unittest.main()

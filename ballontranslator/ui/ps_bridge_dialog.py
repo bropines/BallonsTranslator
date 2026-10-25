@@ -13,6 +13,7 @@ import time
 import zipfile
 from typing import Any, Callable, List, NamedTuple, Optional, Tuple
 
+from qtpy import QT6
 from qtpy.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -27,12 +28,39 @@ from qtpy.QtWidgets import (
     QSizePolicy,
 )
 from qtpy.QtCore import QCoreApplication, QObject, Qt, QTimer, Signal
-from qtpy.QtGui import QHideEvent, QShowEvent
+from qtpy.QtGui import (
+    QColor,
+    QFont,
+    QHideEvent,
+    QShowEvent,
+    QTextCharFormat,
+    QTextCursor,
+    QTextDocument,
+)
 
 from ballontranslator.utils.config import PS_BRIDGE_PORTS, pcfg
+from ballontranslator.utils.fontformat import (
+    FontWeight,
+    font_weight_from_qt,
+    font_weight_to_qt,
+    pt2px,
+    px2pt,
+)
 from ballontranslator.utils.logger import logger as LOGGER
 from ballontranslator.utils.proj_imgtrans import ProjImgTrans, TextBlkEncoder
 from ballontranslator.utils.textblock import TextBlock
+from .text_engine.annotations import (
+    TEXT_COMBINE_NONE,
+    _rewrite_cursor_char_formats,
+    emphasis_values,
+    letter_spacing_value,
+    ruby_values,
+    text_combine_upright_values,
+    to_rich_text_html,
+)
+from .text_engine.font_family import font_family_for_project, qfont_with_family
+from .text_engine.pipeline_formatting import _load_text_block_document
+from .text_engine.rendering.indexing import _utf16_boundaries, _utf16_length
 
 
 class PhotoshopBridgeUpdateError(ValueError):
@@ -73,20 +101,134 @@ def normalize_bridge_text(text: str) -> str:
 
 
 # Fields an update writes; each must still hold what Photoshop received.
-BRIDGE_WRITABLE_FIELDS = ("translation", "font_size", "font")
+BRIDGE_WRITABLE_FIELDS = (
+    "translation", "font_size", "font", "runs", "alignment", "opacity", "angle",
+)
 # Fields that tell whether a block number still means the same block.
 BRIDGE_IDENTITY_FIELDS = ("text", "xyxy")
 
 
-def photoshop_bridge_block_snapshot(block: TextBlock) -> dict:
+def _bridge_run(
+    start: int,
+    end: int,
+    family: str,
+    weight: int,
+    italic: bool,
+    underline: bool,
+    font_size: float,
+    color: List[int],
+    letter_spacing: float,
+) -> dict:
+    return {
+        "start": start,
+        "end": end,
+        "font_family": family,
+        "weight": int(weight),
+        "bold": int(weight) >= 600,
+        "italic": bool(italic),
+        "underline": bool(underline),
+        "font_size": float(font_size),
+        "color": [int(channel) for channel in color],
+        "letter_spacing": float(letter_spacing),
+    }
+
+
+def _fontformat_run(block: TextBlock, text: str) -> dict:
+    fmt = block.fontformat
+    return _bridge_run(
+        0, _utf16_length(text), fmt.font_family,
+        int(fmt.font_weight or FontWeight.Normal), fmt.italic, fmt.underline,
+        fmt.font_size, fmt.foreground_color(), fmt.letter_spacing,
+    )
+
+
+def bridge_text_runs(block: TextBlock) -> Tuple[str, List[dict]]:
+    """Return the block's plain text and the character runs covering it.
+
+    Runs come from ``rich_text`` when the block has it, else one run from the
+    fontformat. Offsets are UTF-16 code units (JavaScript string indices) and
+    a paragraph break belongs to the run before it. Sizes are image pixels:
+    rich text stores points, converted with the app's LDPI like the canvas.
+
+    >>> block = TextBlock(translation="Hi \\U0001F600")
+    >>> block.font_size = 30
+    >>> text, runs = bridge_text_runs(block)
+    >>> (runs[0]["start"], runs[0]["end"], runs[0]["font_size"])
+    (0, 5, 30.0)
+    """
+    fmt = block.fontformat
+    if not block.rich_text:
+        text = block.translation
+        if not text:
+            return text, []
+        return text, [_fontformat_run(block, text)]
+
+    document = _load_text_block_document(block)
+    default_font = document.defaultFont()
+    runs: List[dict] = []
+    text_block = document.firstBlock()
+    while text_block.isValid():
+        iterator = text_block.begin()
+        while not iterator.atEnd():
+            fragment = iterator.fragment()
+            char_format = fragment.charFormat()
+            font = char_format.font().resolve(default_font)
+            weight = int(font_weight_from_qt(font.weight()))
+            color = char_format.foreground().color()
+            run = _bridge_run(
+                fragment.position(),
+                fragment.position() + fragment.length(),
+                font_family_for_project(font.family(), weight),
+                weight,
+                font.italic(),
+                font.underline(),
+                pt2px(font.pointSizeF()),
+                [color.red(), color.green(), color.blue()],
+                letter_spacing_value(char_format, fmt.letter_spacing),
+            )
+            previous = runs[-1] if runs else None
+            if previous is not None and all(
+                previous[key] == run[key] for key in run if key not in ("start", "end")
+            ):
+                previous["end"] = run["end"]
+            elif previous is not None:
+                # Covers the paragraph break between the two fragments.
+                previous["end"] = run["start"]
+                runs.append(run)
+            else:
+                run["start"] = 0
+                runs.append(run)
+            iterator += 1
+        text_block = text_block.next()
+
+    text = document.toPlainText()
+    if runs:
+        runs[-1]["end"] = _utf16_length(text)
+    elif text:
+        # Only empty paragraphs: there is no fragment to take a style from.
+        runs.append(_fontformat_run(block, text))
+    return text, runs
+
+
+def photoshop_bridge_block_snapshot(
+    block: TextBlock,
+    runs: Optional[List[dict]] = None,
+) -> dict:
     """Return the block values Photoshop received for later conflict checks.
 
     Rich text and the text box are left out: saving a page regenerates both,
     so comparing them would only cause false conflicts. Box changes arrive as
-    a delta and apply to the current box.
+    a delta and apply to the current box. ``runs`` takes the block's
+    :func:`bridge_text_runs` when the caller already has them.
+
+    >>> snapshot = photoshop_bridge_block_snapshot(TextBlock(translation="a"))
+    >>> (snapshot["alignment"], snapshot["opacity"], snapshot["angle"])
+    (0, 1.0, 0.0)
     """
     block_data = _json_value(block.to_dict())
     fontformat = block_data.get("fontformat") or {}
+    if runs is None:
+        runs = bridge_text_runs(block)[1]
     return {
         "translation": block_data.get("translation", ""),
         "font_size": fontformat.get("font_size"),
@@ -95,6 +237,10 @@ def photoshop_bridge_block_snapshot(block: TextBlock) -> dict:
             "bold": int(fontformat.get("font_weight") or 400) >= 600,
             "italic": bool(fontformat.get("italic")),
         },
+        "alignment": int(block.fontformat.alignment),
+        "opacity": float(block.fontformat.opacity),
+        "angle": float(block.angle or 0),
+        "runs": _json_value(runs),
         "text": block_data.get("text", []),
         "xyxy": block_data.get("xyxy", []),
     }
@@ -124,6 +270,38 @@ class BridgeBlockUpdate(NamedTuple):
     font: Optional[dict]
     # Moves of the left, top, right and bottom edges of the text box.
     box_delta: Optional[Tuple[float, float, float, float]]
+    # [{start, end, font, font_size, color, underline}] in UTF-16 offsets of
+    # ``translation``; set when the text or its character styles change.
+    runs: Optional[List[dict]] = None
+    alignment: Optional[int] = None
+    opacity: Optional[float] = None
+    # Degrees, clockwise on screen.
+    angle: Optional[float] = None
+
+
+class BridgeApplyResult(NamedTuple):
+    """What applying one Photoshop payload changed."""
+
+    applied: int
+    # Blocks whose new text dropped ruby, emphasis marks or tate-chu-yoko.
+    annotations_lost: int = 0
+
+
+def bridge_apply_message(result: BridgeApplyResult) -> str:
+    """Describe an applied payload for the user.
+
+    >>> bridge_apply_message(BridgeApplyResult(2))
+    'Applied 2 Photoshop change(s).'
+    """
+    message = _tr("Applied {count} Photoshop change(s).").format(
+        count=result.applied
+    )
+    if result.annotations_lost:
+        message += " " + _tr(
+            "The text of {count} block(s) changed in Photoshop, so their ruby, "
+            "emphasis marks and tate-chu-yoko were removed."
+        ).format(count=result.annotations_lost)
+    return message
 
 
 def _is_number(value: Any) -> bool:
@@ -132,6 +310,226 @@ def _is_number(value: Any) -> bool:
         and not isinstance(value, bool)
         and math.isfinite(value)
     )
+
+
+def _is_bridge_font(font: Any) -> bool:
+    return (
+        isinstance(font, dict)
+        and isinstance(font.get("family"), str)
+        and 0 < len(font["family"].strip()) <= 256
+        and isinstance(font.get("bold"), bool)
+        and isinstance(font.get("italic"), bool)
+    )
+
+
+def _is_bridge_color(color: Any) -> bool:
+    return (
+        isinstance(color, list)
+        and len(color) == 3
+        and all(_is_number(channel) and 0 <= channel <= 255 for channel in color)
+    )
+
+
+def _validated_bridge_runs(
+    runs: Any,
+    raw_translation: str,
+    translation: str,
+) -> Optional[List[dict]]:
+    """Check runs sent with ``raw_translation`` and move them onto ``translation``.
+
+    ``translation`` is ``raw_translation`` after :func:`normalize_bridge_text`;
+    each run is normalized on its own, so its offsets follow the dropped
+    characters. Returns None when the runs are invalid.
+
+    >>> runs = [{"start": 0, "end": 3, "font": {"family": "A", "bold": False,
+    ...          "italic": False}, "font_size": 20, "color": [0, 0, 0],
+    ...          "underline": False},
+    ...         {"start": 3, "end": 5, "font": {"family": "A", "bold": True,
+    ...          "italic": False}, "font_size": 20, "color": [0, 0, 0],
+    ...          "underline": False}]
+    >>> [(run["start"], run["end"]) for run in
+    ...  _validated_bridge_runs(runs, "a\\r\\nbc", "a\\nbc")]
+    [(0, 2), (2, 4)]
+    """
+    if not isinstance(runs, list):
+        return None
+    boundaries = _utf16_boundaries(raw_translation)
+    python_index = {offset: index for index, offset in enumerate(boundaries)}
+    validated: List[dict] = []
+    position = 0
+    offset = 0
+    for run in runs:
+        if not (
+            isinstance(run, dict)
+            and isinstance(run.get("start"), int)
+            and isinstance(run.get("end"), int)
+            and not isinstance(run["start"], bool)
+            and not isinstance(run["end"], bool)
+            and run["start"] == position
+            and run["end"] > run["start"]
+            # An offset inside a surrogate pair has no Python index.
+            and run["end"] in python_index
+            and _is_bridge_font(run.get("font"))
+            and _is_number(run.get("font_size"))
+            and run["font_size"] > 0
+            and _is_bridge_color(run.get("color"))
+            and isinstance(run.get("underline"), bool)
+        ):
+            return None
+        segment = normalize_bridge_text(
+            raw_translation[python_index[run["start"]]:python_index[run["end"]]]
+        )
+        position = run["end"]
+        if not segment:
+            continue
+        end = offset + _utf16_length(segment)
+        validated.append({
+            "start": offset,
+            "end": end,
+            "font": {
+                "family": run["font"]["family"],
+                "bold": run["font"]["bold"],
+                "italic": run["font"]["italic"],
+            },
+            "font_size": float(run["font_size"]),
+            "color": [int(round(channel)) for channel in run["color"]],
+            "underline": run["underline"],
+        })
+        offset = end
+    if position != boundaries[-1] or offset != _utf16_length(translation):
+        # A CR LF pair split between two runs normalizes differently.
+        return None
+    return validated
+
+
+def _bridge_update_runs(runs: Any) -> Any:
+    """Reduce snapshot runs to the fields an update sends.
+
+    >>> _bridge_update_runs([{"start": 0, "end": 1, "font_family": "A",
+    ...     "weight": 300, "bold": False, "italic": True, "underline": False,
+    ...     "font_size": 9.0, "color": [1, 2, 3], "letter_spacing": 1.0}])[0]["font"]
+    {'family': 'A', 'bold': False, 'italic': True}
+    """
+    try:
+        return [
+            {
+                "start": run["start"],
+                "end": run["end"],
+                "font": {
+                    "family": run["font_family"],
+                    "bold": run["bold"],
+                    "italic": run["italic"],
+                },
+                "font_size": run["font_size"],
+                "color": run["color"],
+                "underline": run["underline"],
+            }
+            for run in runs
+        ]
+    except (KeyError, TypeError):
+        return None
+
+
+def _apply_bridge_run_style(
+    char_format: QTextCharFormat,
+    run: dict,
+    default_font: QFont,
+) -> None:
+    font = char_format.font().resolve(default_font)
+    weight = font_weight_from_qt(font.weight())
+    if (weight >= 600) != run["font"]["bold"]:
+        # Photoshop only tells bold from regular; keep other weights as they are.
+        weight = FontWeight.Bold if run["font"]["bold"] else FontWeight.Normal
+    qt_weight = QFont.Weight(font_weight_to_qt(weight, qt6=QT6))
+    family = run["font"]["family"]
+    if font_family_for_project(font.family(), int(weight)) != family:
+        underline = char_format.fontUnderline()
+        font.setWeight(qt_weight)
+        char_format.setFont(qfont_with_family(font, family))
+        char_format.setFontUnderline(underline)
+    char_format.setFontWeight(qt_weight)
+    char_format.setFontItalic(run["font"]["italic"])
+    char_format.setFontUnderline(run["underline"])
+    if not math.isclose(pt2px(font.pointSizeF()), run["font_size"], abs_tol=1e-6):
+        char_format.setFontPointSize(px2pt(run["font_size"]))
+    char_format.setForeground(QColor(*run["color"]))
+
+
+def _has_bt_only_annotations(document: QTextDocument) -> bool:
+    text_block = document.firstBlock()
+    while text_block.isValid():
+        iterator = text_block.begin()
+        while not iterator.atEnd():
+            char_format = iterator.fragment().charFormat()
+            if (
+                ruby_values(char_format)[0]
+                or emphasis_values(char_format)[0] != "none"
+                or text_combine_upright_values(char_format)[0] != TEXT_COMBINE_NONE
+            ):
+                return True
+            iterator += 1
+        text_block = text_block.next()
+    return False
+
+
+def apply_bridge_runs(block: TextBlock, translation: str, runs: List[dict]) -> bool:
+    """Make the block's text and character styles match Photoshop's runs.
+
+    When the text is unchanged the styles are merged into the existing rich
+    text, which keeps letter spacing, line spacing and every BT-only run
+    feature. New text is rebuilt from the fontformat, so its per-run letter
+    spacing, paragraph line spacing, ligature options, ruby, emphasis marks
+    and tate-chu-yoko are lost. The block fontformat takes the first run's
+    font and color and the smallest run size, as saving a page in the app
+    does. Returns True when ruby, emphasis marks or tate-chu-yoko were lost.
+
+    >>> block = TextBlock(translation="ab")
+    >>> run = {"start": 0, "end": 2, "font_size": 30.0, "color": [9, 0, 0],
+    ...        "font": {"family": "Arial", "bold": True, "italic": False},
+    ...        "underline": False}
+    >>> apply_bridge_runs(block, "ab", [run])
+    False
+    >>> bridge_text_runs(block)[1][0]["color"], block.font_size
+    ([9, 0, 0], 30.0)
+    """
+    fmt = block.fontformat
+    document = _load_text_block_document(block)
+    text_changed = document.toPlainText() != translation
+    lost = text_changed and _has_bt_only_annotations(document)
+    block.translation = translation
+    if not runs:
+        block.rich_text = ""
+        return lost
+
+    first = runs[0]
+    fmt.font_family = first["font"]["family"]
+    if (int(fmt.font_weight or FontWeight.Normal) >= 600) != first["font"]["bold"]:
+        fmt.font_weight = FontWeight.Bold if first["font"]["bold"] else FontWeight.Normal
+    fmt.italic = first["font"]["italic"]
+    fmt.underline = first["underline"]
+    fmt.frgb = list(first["color"])
+    fmt.font_size = min(run["font_size"] for run in runs)
+    if text_changed:
+        block.rich_text = ""
+        document = _load_text_block_document(block)
+
+    default_font = document.defaultFont()
+    cursor = QTextCursor(document)
+    for run in runs:
+        cursor.setPosition(run["start"])
+        cursor.setPosition(run["end"], QTextCursor.MoveMode.KeepAnchor)
+        _rewrite_cursor_char_formats(
+            cursor,
+            lambda char_format, run=run: _apply_bridge_run_style(
+                char_format, run, default_font
+            ),
+        )
+    block.rich_text = to_rich_text_html(
+        document,
+        line_spacing_fallback=fmt.line_spacing,
+        line_spacing_type_fallback=fmt.line_spacing_type,
+    )
+    return lost
 
 
 def bridge_values_match(sent: Any, current: Any) -> bool:
@@ -285,12 +683,19 @@ def validate_photoshop_bridge_updates(
                 "again."
             )
 
-        translation = update.get("translation")
-        if not isinstance(translation, str):
+        raw_translation = update.get("translation")
+        if not isinstance(raw_translation, str):
             raise PhotoshopBridgeUpdateError(
                 f"Block #{block_index + 1} has invalid text."
             )
-        translation = normalize_bridge_text(translation)
+        translation = normalize_bridge_text(raw_translation)
+        runs = update.get("runs")
+        if runs is not None:
+            runs = _validated_bridge_runs(runs, raw_translation, translation)
+            if runs is None:
+                raise PhotoshopBridgeUpdateError(
+                    f"Block #{block_index + 1} has invalid text styles."
+                )
         font_size = update.get("font_size")
         if font_size is not None and (
             not _is_number(font_size) or font_size <= 0
@@ -299,13 +704,7 @@ def validate_photoshop_bridge_updates(
                 f"Block #{block_index + 1} has an invalid font size."
             )
         font = update.get("font")
-        if font is not None and not (
-            isinstance(font, dict)
-            and isinstance(font.get("family"), str)
-            and 0 < len(font["family"].strip()) <= 256
-            and isinstance(font.get("bold"), bool)
-            and isinstance(font.get("italic"), bool)
-        ):
+        if font is not None and not _is_bridge_font(font):
             raise PhotoshopBridgeUpdateError(
                 f"Block #{block_index + 1} has an invalid font."
             )
@@ -318,23 +717,60 @@ def validate_photoshop_bridge_updates(
             raise PhotoshopBridgeUpdateError(
                 f"Block #{block_index + 1} has an invalid box change."
             )
+        alignment = update.get("alignment")
+        opacity = update.get("opacity")
+        angle = update.get("angle")
+        if (
+            (alignment is not None and (
+                not isinstance(alignment, int)
+                or isinstance(alignment, bool)
+                or alignment not in (0, 1, 2)
+            ))
+            or (opacity is not None and not (_is_number(opacity) and 0 <= opacity <= 1))
+            or (angle is not None and not _is_number(angle))
+        ):
+            raise PhotoshopBridgeUpdateError(
+                f"Block #{block_index + 1} has an invalid layer setting."
+            )
 
         written = {
             "translation": translation != normalize_bridge_text(
                 str(base.get("translation") or "")
             ),
-            "font_size": font_size is not None
-            and not bridge_values_match(font_size, base.get("font_size")),
-            "font": font is not None and font != base.get("font"),
         }
+        # Runs describe the font of every character, so they replace the
+        # single font fields of older payloads.
+        written["runs"] = runs is not None and (
+            written["translation"]
+            or not bridge_values_match(runs, _bridge_update_runs(base.get("runs")))
+        )
+        written["font_size"] = runs is None and font_size is not None and not (
+            bridge_values_match(font_size, base.get("font_size"))
+        )
+        written["font"] = runs is None and font is not None and font != base.get("font")
+        for key, value in (("alignment", alignment), ("opacity", opacity), ("angle", angle)):
+            written[key] = value is not None and not bridge_values_match(
+                value, base.get(key)
+            )
+        checked = dict(written)
+        # New runs are offsets into the text, so the text must be unchanged too.
+        checked["translation"] = written["translation"] or written["runs"]
         conflicts = [
             key for key in BRIDGE_WRITABLE_FIELDS
-            if written[key] and (
+            if checked[key] and (
                 key not in base or not bridge_values_match(base[key], current[key])
             )
         ]
         if conflicts:
-            names = {"translation": "text", "font_size": "font size", "font": "font"}
+            names = {
+                "translation": "text",
+                "font_size": "font size",
+                "font": "font",
+                "runs": "text style",
+                "alignment": "alignment",
+                "opacity": "opacity",
+                "angle": "rotation",
+            }
             fields = ", ".join(names[key] for key in conflicts)
             raise PhotoshopBridgeUpdateError(
                 f"Block #{block_index + 1} on page '{page_name}' was edited in "
@@ -348,6 +784,10 @@ def validate_photoshop_bridge_updates(
                 font_size if written["font_size"] else None,
                 dict(font) if written["font"] else None,
                 tuple(box_delta) if box_delta is not None and any(box_delta) else None,
+                runs if written["runs"] else None,
+                alignment if written["alignment"] else None,
+                float(opacity) if written["opacity"] else None,
+                float(angle) if written["angle"] else None,
             )
         )
 
@@ -365,7 +805,7 @@ def _tr(text: str) -> str:
 
 def consume_photoshop_bridge_update(
     project_path: str,
-    apply_updates: Callable[[dict], int],
+    apply_updates: Callable[[dict], BridgeApplyResult],
 ) -> Optional[Tuple[str, str]]:
     """Apply the changes Photoshop left for a project.
 
@@ -378,7 +818,9 @@ def consume_photoshop_bridge_update(
     - ``rejected``: the changes conflict with the project. The file is renamed
       to ``*.rejected.json`` so it cannot block the next send from Photoshop.
 
-    >>> consume_photoshop_bridge_update("missing/project.json", lambda p: 0) is None
+    >>> consume_photoshop_bridge_update(
+    ...     "missing/project.json", lambda p: BridgeApplyResult(0)
+    ... ) is None
     True
     """
     update_path = photoshop_bridge_update_path(project_path)
@@ -391,7 +833,7 @@ def consume_photoshop_bridge_update(
         return "waiting", _tr("Waiting for Photoshop to finish writing changes...")
 
     try:
-        updated_count = apply_updates(payload)
+        result = apply_updates(payload)
     except PhotoshopBridgeUpdateError as error:
         LOGGER.warning("Photoshop Bridge update was rejected: %s", error)
         rejected_path = update_path[:-len(".json")] + ".rejected.json"
@@ -407,9 +849,7 @@ def consume_photoshop_bridge_update(
         os.remove(update_path)
     except OSError as error:
         LOGGER.warning("Could not remove the applied Photoshop update: %s", error)
-    return "applied", _tr("Applied {count} Photoshop change(s).").format(
-        count=updated_count
-    )
+    return "applied", bridge_apply_message(result)
 
 
 # Photoshop's install folder holds Presets/Scripts next to the .app bundle.
