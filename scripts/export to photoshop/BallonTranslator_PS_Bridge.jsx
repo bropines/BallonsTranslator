@@ -1,10 +1,10 @@
 // BallonTranslator_PS_Bridge.jsx
-// Version: 2.6.1
+// Version: 2.6.2
 // Multilingual Bidirectional Bridge between BallonsTranslator and Adobe Photoshop (CC 2019 - CC 2026+)
 
 #target photoshop
 
-var BT_BRIDGE_VERSION = "2.6.1";
+var BT_BRIDGE_VERSION = "2.6.2";
 
 
 
@@ -870,6 +870,12 @@ function runBallonTranslatorBridge() {
         var targetProjectPath = getCleanPath(jsonFile);
         var matchedPage = null;
         var blockBases = [];
+        // A PSD from elsewhere could name any path; only write next to an
+        // existing project file.
+        if (docState && !(/\.json$/i.test(docState.project_path) &&
+                new File(docState.project_path).exists)) {
+            docState = null;
+        }
         if (docState) {
             targetProjectPath = docState.project_path;
             matchedPage = docState.page;
@@ -1183,8 +1189,10 @@ function runBallonTranslatorBridge() {
                     var targetW = Math.max(origW, 40);
                     var targetH = Math.max(origH, 20);
 
+                    var isVertical = Boolean(blk.fontformat && blk.fontformat.vertical);
+
                     // Only expand skinny 1-character vertical strips (< 70px) if Smart Bounds is enabled
-                    if (chkSmartBox.value && origW < 70 && origH > origW * 1.5) {
+                    if (!isVertical && chkSmartBox.value && origW < 70 && origH > origW * 1.5) {
                         targetW = Math.max(Math.round(origW * 1.8), 120);
                         targetH = Math.max(Math.round(origH * 1.05), 40);
                         posX = Math.max(0, Math.round(posX - (targetW - origW) / 2));
@@ -1193,6 +1201,10 @@ function runBallonTranslatorBridge() {
                     var tLayer = transGroup.artLayers.add();
                     tLayer.kind = LayerKind.TEXT;
                     var tItem = tLayer.textItem;
+
+                    if (isVertical) {
+                        tItem.direction = Direction.VERTICAL;
+                    }
 
                     // Set text as Paragraph Box
                     if (targetW > 20 && targetH > 20) {
@@ -1283,7 +1295,18 @@ function runBallonTranslatorBridge() {
                     // Vertical Centering inside Balloon Box (matching BallonsTranslator canvas alignment)
                     if (chkVCenter.value) {
                         try {
-                            if (tItem.kind === TextType.PARAGRAPHTEXT && targetH > 20) {
+                            if (isVertical && tItem.kind === TextType.PARAGRAPHTEXT) {
+                                // Vertical columns start at the right edge; center them across the box.
+                                var vb = tLayer.bounds;
+                                var inkLeft = vb[0].as("px");
+                                var inkW = vb[2].as("px") - inkLeft;
+                                if (inkW > 0 && inkW < targetW) {
+                                    var shiftX = (posX + targetW / 2) - (inkLeft + inkW / 2);
+                                    if (Math.abs(shiftX) > 2) {
+                                        tLayer.translate(shiftX, 0);
+                                    }
+                                }
+                            } else if (tItem.kind === TextType.PARAGRAPHTEXT && targetH > 20) {
                                 var tb = tLayer.bounds; // [left, top, right, bottom]
                                 var actualTop = tb[1].as("px");
                                 var actualBottom = tb[3].as("px");
