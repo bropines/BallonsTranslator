@@ -40,6 +40,7 @@ import socket
 import sys
 import threading
 import time
+import unicodedata
 from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -172,17 +173,25 @@ def bridge_status(window: Any) -> Dict[str, Any]:
     }
 
 
-def bridge_tracking(letter_spacing: float) -> int:
+def bridge_tracking(letter_spacing: float, text: str = "") -> int:
     """Return Photoshop tracking (1/1000 em) for a BT letter-spacing multiplier.
 
     BT widens each glyph's own advance by ``letter_spacing - 1``; Photoshop
-    adds one amount per character. The two agree for full-width (CJK) glyphs;
-    Latin text comes out about twice as wide as in the app.
+    adds one amount per character. Full-width (CJK) glyphs are about one em
+    wide and others about half, so the amount follows the share of wide
+    characters in ``text`` (one em when there is none).
 
-    >>> bridge_tracking(1.15)
-    150
+    >>> bridge_tracking(1.15), bridge_tracking(1.15, "縦書き"), bridge_tracking(1.15, "Hello")
+    (150, 150, 75)
     """
-    return int(round((letter_spacing - 1) * 1000))
+    glyphs = [char for char in text if not char.isspace()]
+    em = 1.0
+    if glyphs:
+        em = sum(
+            1.0 if unicodedata.east_asian_width(char) in "WF" else 0.5
+            for char in glyphs
+        ) / len(glyphs)
+    return int(round((letter_spacing - 1) * 1000 * em))
 
 
 def _first_active_effect(stack: TextEffectStack, kind: type, **values: str) -> Any:
@@ -346,16 +355,24 @@ def bridge_page(window: Any, page_name: Optional[str]) -> Dict[str, Any]:
     page_blocks, bases = [], []
     for block in blocks:
         text, runs = bridge_text_runs(block)
+        units = text.encode("utf-16-le")
+        page_runs = [
+            dict(run, tracking=bridge_tracking(
+                run["letter_spacing"],
+                units[run["start"] * 2:run["end"] * 2].decode("utf-16-le"),
+            ))
+            for run in runs
+        ]
+        style = bridge_block_style(block, runs)
+        if page_runs:
+            style["tracking"] = page_runs[0]["tracking"]
         page_blocks.append({
             "translation": text,
             "text": list(block.text),
             "rect": [float(value) for value in bridge_block_rect(block)],
             "angle": float(block.angle or 0),
-            "style": bridge_block_style(block, runs),
-            "runs": [
-                dict(run, tracking=bridge_tracking(run["letter_spacing"]))
-                for run in runs
-            ],
+            "style": style,
+            "runs": page_runs,
         })
         bases.append(photoshop_bridge_block_snapshot(block, runs))
     return {

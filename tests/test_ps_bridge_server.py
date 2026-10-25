@@ -177,8 +177,10 @@ class PhotoshopBridgeServerTest(BridgeRequests, unittest.TestCase):
         self.assertEqual(page_block["angle"], 0.0)
         self.assertEqual(
             [(run["start"], run["end"], run["tracking"]) for run in page_block["runs"]],
-            [(0, 3, 150)],
+            # Latin glyphs are about half an em, so 1.15 adds about 75/1000 em.
+            [(0, 3, 75)],
         )
+        self.assertEqual(page_block["style"]["tracking"], 75)
         self.assertEqual(page_block["style"]["font_size"], page_block["runs"][0]["font_size"])
         self.assertEqual(data["bases"], [photoshop_bridge_block_snapshot(block)])
         # The base runs are the page runs without the derived tracking.
