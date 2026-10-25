@@ -27,6 +27,12 @@ class BridgeError extends Error {
 // ---------------------------------------------------------------------------
 // Connection to the app
 
+// A plain file name for the temporary copy: no folders, no reserved characters.
+function safeFileName(name) {
+  const base = String(name).split(/[\\/]/).pop().replace(/[<>:"|?*\u0000-\u001f]/g, "_");
+  return base.replace(/^\.+/, "") || "page.png";
+}
+
 class BridgeClient {
   constructor() {
     this.port = null;
@@ -42,9 +48,8 @@ class BridgeClient {
   async find() {
     for (const port of PORTS) {
       try {
-        const response = await fetch("http://localhost:" + port + "/api/v1/status", {
-          headers: { "X-BT-Token": this.token }
-        });
+        // No token here: it goes only to a server known to be the app.
+        const response = await fetch("http://localhost:" + port + "/api/v1/status");
         if ((response.headers.get("server") || "").indexOf(SERVER_NAME) === 0) {
           this.port = port;
           return;
@@ -93,7 +98,9 @@ class BridgeClient {
     try {
       response = await fetch(this.url("pair"), {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        // A custom header makes browsers preflight the request, which the
+        // app never allows, so web pages cannot trigger pairing.
+        headers: { "Content-Type": "application/json", "X-BT-Client": "photoshop-panel" },
         body: "{}"
       });
     } catch (error) {
@@ -122,7 +129,7 @@ class BridgeClient {
       );
       return {
         bytes: await response.arrayBuffer(),
-        filename: response.headers.get("x-bt-filename") || page
+        filename: safeFileName(response.headers.get("x-bt-filename") || page)
       };
     } catch (error) {
       if (error.kind === "error") return null;
@@ -315,12 +322,14 @@ async function textSizePx(doc, layer) {
 
 async function createTextLayer(doc, block, options) {
   const style = block.style;
+  const vertical = Boolean(style.vertical);
   const toPt = 72 / doc.resolution;
   let [left, top, width, height] = block.rect;
-  width = Math.max(width, 40);
+  width = Math.max(width, 20);
   height = Math.max(height, 20);
-  // Skinny vertical-text boxes are too narrow for horizontal translations.
-  if (options.smartBounds && width < 70 && height > width * 1.5) {
+  // Skinny boxes left by vertical source text are too narrow for horizontal
+  // translations.
+  if (!vertical && options.smartBounds && width < 70 && height > width * 1.5) {
     const wider = Math.max(Math.round(width * 1.8), 120);
     left = Math.max(0, left - (wider - width) / 2);
     width = wider;
@@ -336,24 +345,26 @@ async function createTextLayer(doc, block, options) {
   const fontName = resolveFont(style.font_family, style.bold, style.italic);
   if (fontName) textStyle.fontPostScriptName = fontName;
   const align = ["left", "center", "right"][style.alignment] || "center";
-  const make = async (boxTop, boxHeight) => {
+  const orientation = { _enum: "orientation", _value: vertical ? "vertical" : "horizontal" };
+  const make = async (box) => {
     await action.batchPlay([{
       _obj: "make",
       _target: [{ _ref: "textLayer" }],
       using: {
         _obj: "textLayer",
         textKey: text,
+        orientation: orientation,
         // Photoshop reads the click point in percent of the document size.
         textClickPoint: {
           _obj: "paint",
-          horizontal: { _unit: "percentUnit", _value: left / doc.width * 100 },
-          vertical: { _unit: "percentUnit", _value: boxTop / doc.height * 100 }
+          horizontal: { _unit: "percentUnit", _value: box.left / doc.width * 100 },
+          vertical: { _unit: "percentUnit", _value: box.top / doc.height * 100 }
         },
         textShape: [{
           _obj: "textShape",
           char: { _enum: "char", _value: "box" },
-          orientation: { _enum: "orientation", _value: "horizontal" },
-          bounds: { _obj: "rectangle", left: 0, top: 0, right: width * toPt, bottom: boxHeight * toPt }
+          orientation: orientation,
+          bounds: { _obj: "rectangle", left: 0, top: 0, right: box.width * toPt, bottom: box.height * toPt }
         }],
         textStyleRange: [{ _obj: "textStyleRange", from: 0, to: text.length, textStyle: textStyle }],
         paragraphStyleRange: [{
@@ -364,19 +375,33 @@ async function createTextLayer(doc, block, options) {
     }], {});
     return doc.activeLayers[0];
   };
-  let layer = await make(top, height);
+  const box = { left: left, top: top, width: width, height: height };
+  let layer = await make(box);
   if (options.verticalCenter) {
-    // Paragraph boxes keep text at the top. Measure the text, then remake the
-    // box so the text sits in the middle of the block. The spare room below
-    // keeps Photoshop from hiding the last line when the leading is taller
-    // than the ink.
-    const bounds = layer.boundsNoEffects;
-    const inset = bounds.top - top;
-    const textHeight = bounds.bottom - bounds.top;
-    const boxHeight = inset + textHeight + style.font_size * 0.8;
-    if (textHeight > 0 && boxHeight < height) {
-      await layer.delete();
-      layer = await make(top + (height - textHeight) / 2 - inset, boxHeight);
+    // Paragraph boxes start lines at the top (columns at the right for
+    // vertical text). Measure the text, then remake the box so the text sits
+    // in the middle of the block. The spare room after the text keeps
+    // Photoshop from hiding the last line when the leading is larger than
+    // the ink.
+    const ink = layer.boundsNoEffects;
+    const spare = style.font_size * 0.8;
+    if (vertical) {
+      const inset = left + width - ink.right;
+      const inkWidth = ink.right - ink.left;
+      const boxWidth = inset + inkWidth + spare;
+      if (inkWidth > 0 && boxWidth < width) {
+        await layer.delete();
+        const right = left + width / 2 + inkWidth / 2 + inset;
+        layer = await make({ left: right - boxWidth, top: top, width: boxWidth, height: height });
+      }
+    } else {
+      const inset = ink.top - top;
+      const inkHeight = ink.bottom - ink.top;
+      const boxHeight = inset + inkHeight + spare;
+      if (inkHeight > 0 && boxHeight < height) {
+        await layer.delete();
+        layer = await make({ left: left, top: top + (height - inkHeight) / 2 - inset, width: width, height: boxHeight });
+      }
     }
   }
   if (options.stroke && style.stroke && style.stroke.width > 0) {

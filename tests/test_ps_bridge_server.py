@@ -27,6 +27,7 @@ from ballontranslator.utils.proj_imgtrans import ProjImgTrans
 from ballontranslator.utils.textblock import TextBlock
 
 TOKEN = "test-token"
+PANEL_HEADERS = {"X-BT-Token": "", "X-BT-Client": "photoshop-panel"}
 # The tests talk to localhost directly, never through a configured proxy.
 OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
@@ -129,13 +130,27 @@ class PhotoshopBridgeServerTest(BridgeRequests, unittest.TestCase):
         self.assertEqual(data["project"]["current_page"], "page.png")
 
     def test_pairing_hands_out_the_token_only_when_the_user_agrees(self) -> None:
-        status, data = self.request_json("/api/v1/pair", data={}, headers={"X-BT-Token": ""})
+        status, data = self.request_json("/api/v1/pair", data={}, headers=PANEL_HEADERS)
         self.assertEqual((status, data), (200, {"token": TOKEN}))
 
         self.confirm_pairing.return_value = None
-        status, data = self.request_json("/api/v1/pair", data={}, headers={"X-BT-Token": ""})
+        status, data = self.request_json("/api/v1/pair", data={}, headers=PANEL_HEADERS)
         self.assertEqual(status, 403)
         self.assertNotIn("token", data)
+
+        # Right after a refusal the user is not asked again.
+        self.confirm_pairing.reset_mock()
+        status, _ = self.request_json("/api/v1/pair", data={}, headers=PANEL_HEADERS)
+        self.assertEqual(status, 429)
+        self.confirm_pairing.assert_not_called()
+
+    def test_pairing_needs_the_panel_header(self) -> None:
+        # Web pages cannot add custom headers without a preflight, so a plain
+        # POST from a browser must not reach the user.
+        status, _ = self.request_json("/api/v1/pair", data={}, headers={"X-BT-Token": ""})
+
+        self.assertEqual(status, 403)
+        self.confirm_pairing.assert_not_called()
 
     @unittest.skipUnless(_ipv6_available(), "IPv6 loopback is not available")
     def test_ipv6_localhost_is_served(self) -> None:
@@ -265,7 +280,7 @@ class PhotoshopBridgeServiceTest(BridgeRequests, unittest.TestCase):
             return_value=QMessageBox.StandardButton.Yes,
         ) as question:
             status, data = self.request_json(
-                "/api/v1/pair", data={}, headers={"X-BT-Token": ""}
+                "/api/v1/pair", data={}, headers=PANEL_HEADERS
             )
         question.assert_called_once()
         self.assertEqual(status, 200)

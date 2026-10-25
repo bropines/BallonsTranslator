@@ -302,7 +302,7 @@ def validate_photoshop_bridge_updates(
         if font is not None and not (
             isinstance(font, dict)
             and isinstance(font.get("family"), str)
-            and font["family"].strip()
+            and 0 < len(font["family"].strip()) <= 256
             and isinstance(font.get("bold"), bool)
             and isinstance(font.get("italic"), bool)
         ):

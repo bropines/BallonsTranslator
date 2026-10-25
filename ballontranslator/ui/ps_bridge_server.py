@@ -8,9 +8,10 @@ The server is off by default (``pcfg.ps_bridge.live_enabled``). It listens on
 localhost only, on both 127.0.0.1 and ::1 because Photoshop resolves
 ``localhost`` to ::1 on macOS. A panel pairs once: ``POST pair`` asks the user
 in BallonsTranslator and answers with the token every other request must send
-in ``X-BT-Token``. Web pages cannot send that header to another origin without
-a CORS preflight, which this server never grants, and the Host check stops DNS
-rebinding.
+in ``X-BT-Token``. Pairing itself needs an ``X-BT-Client`` header. Web pages
+cannot send custom headers to another origin without a CORS preflight, which
+this server never grants, so they cannot pair or call the API, and the Host
+check stops DNS rebinding.
 
 Requests run on server threads. Anything that reads or changes the project
 runs on the Qt main thread through :class:`MainThreadCaller`; image bytes are
@@ -66,6 +67,8 @@ API_VERSION = 1
 MAIN_THREAD_TIMEOUT = 30.0
 # The user answers the pairing question in BallonsTranslator.
 PAIRING_TIMEOUT = 120.0
+# After a refusal, further pairing requests are turned away for a while.
+PAIRING_COOLDOWN = 10.0
 MAX_BODY_BYTES = 8 * 1024 * 1024
 LOCAL_HOSTS = ("127.0.0.1", "localhost", "[::1]")
 IMAGE_KINDS = ("original", "inpainted", "mask")
@@ -258,6 +261,8 @@ class _BridgeRequestHandler(BaseHTTPRequestHandler):
     server: _BridgeHTTPServer
     server_version = "BallonsTranslatorBridge/1"
     protocol_version = "HTTP/1.1"
+    # Drop connections that stop sending instead of holding a thread.
+    timeout = 30
 
     def log_message(self, format: str, *args: Any) -> None:
         LOGGER.debug("Photoshop Bridge server: " + format, *args)
@@ -282,6 +287,8 @@ class _BridgeRequestHandler(BaseHTTPRequestHandler):
                 raise BridgeRequestError(404, "Not found.")
             route = url.path[len(API_PREFIX):]
             if method == "POST" and route == "pair":
+                if not self.headers.get("X-BT-Client"):
+                    raise BridgeRequestError(403, "Only the Photoshop panel can pair.")
                 self._send_json(200, {"token": self.server.bridge.pair()})
                 return
             self._check_token()
@@ -388,6 +395,7 @@ class PhotoshopBridgeServer:
         self._threads: List[threading.Thread] = []
         self._token = ""
         self._pairing_lock = threading.Lock()
+        self._declined_at = -PAIRING_COOLDOWN
         self.last_contact = 0.0
 
     @property
@@ -417,7 +425,11 @@ class PhotoshopBridgeServer:
                 409, "Another connection request is waiting in BallonsTranslator."
             )
         try:
+            if time.monotonic() - self._declined_at < PAIRING_COOLDOWN:
+                raise BridgeRequestError(429, "Wait a moment before asking again.")
             token = self._caller.call(self._confirm_pairing, PAIRING_TIMEOUT)
+            if not token:
+                self._declined_at = time.monotonic()
         finally:
             self._pairing_lock.release()
         if not token:

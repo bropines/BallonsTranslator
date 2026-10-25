@@ -36,7 +36,8 @@ const STRINGS = {
     noDocument: "Open a page imported from BallonsTranslator.",
     unchanged: "No changes to send.",
     applied: "Sent: {message}",
-    blocked: "Not applied yet: {message}"
+    blocked: "Not applied yet: {message}",
+    reload: "Reload Panel"
   },
   ru: {
     offline: "BallonsTranslator не запущен или подключение панели выключено. Включите его в BallonsTranslator: Инструменты > Photoshop Bridge.",
@@ -68,7 +69,8 @@ const STRINGS = {
     noDocument: "Откройте страницу, импортированную из BallonsTranslator.",
     unchanged: "Изменений нет.",
     applied: "Отправлено: {message}",
-    blocked: "Пока не применено: {message}"
+    blocked: "Пока не применено: {message}",
+    reload: "Перезагрузить панель"
   }
 };
 const LANG = String(host.uiLocale || "en").toLowerCase().indexOf("ru") === 0 ? "ru" : "en";
@@ -244,6 +246,8 @@ $("select-current").addEventListener("click", () => selectPages((page) => page =
 $("select-all").addEventListener("click", () => selectPages(() => true));
 $("select-none").addEventListener("click", () => selectPages(() => false));
 
+$("version").textContent = "BallonsTranslator panel v" + (require("uxp").versions.plugin || "?");
+
 entrypoints.setup({
   panels: {
     btPanel: {
@@ -254,6 +258,11 @@ entrypoints.setup({
       hide() {
         clearInterval(pollTimer);
         pollTimer = null;
+      },
+      menuItems: [{ id: "reload", label: t("reload") }],
+      invokeMenu(id) {
+        // Picks up panel files changed on disk without restarting Photoshop.
+        if (id === "reload") location.reload();
       }
     }
   }
