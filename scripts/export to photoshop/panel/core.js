@@ -14,6 +14,7 @@ const SERVER_NAME = "BallonsTranslatorBridge";
 const TOKEN_KEY = "ballonstranslator.token";
 const XMP_NS = "http://github.com/dmMaze/BallonsTranslator/ns/psbridge/1.0/";
 const TRANSLATIONS_GROUP = "[BT] Translations";
+const SOURCE_GROUP = "[BT] Source Text";
 
 class BridgeError extends Error {
   // kind: "offline" | "unpaired" | "error"
@@ -434,8 +435,28 @@ async function addImageLayer(doc, image, name, visible) {
   return copy;
 }
 
-// options: {inpainted, mask, stroke, verticalCenter, smartBounds}
-// Returns {document, missingFonts}.
+// A hidden reference group with the recognized source text. Send Changes
+// ignores it.
+async function addSourceTextLayers(doc, pageBlocks) {
+  const plain = { stroke: false, verticalCenter: false, smartBounds: false };
+  const layers = [];
+  for (let index = pageBlocks.length - 1; index >= 0; index--) {
+    const source = pageBlocks[index].text.join("\n").trim();
+    if (!source) continue;
+    const block = Object.assign({}, pageBlocks[index], { translation: source });
+    const made = await createTextLayer(doc, block, plain);
+    made.layer.name = "Source #" + (index + 1) + ": " + layerPreview(source);
+    layers.push(made.layer);
+  }
+  if (layers.length) {
+    const group = await doc.createLayerGroup({ name: SOURCE_GROUP, fromLayers: layers });
+    group.visible = false;
+  }
+}
+
+// options: {inpainted, mask, originalText, stroke, verticalCenter, smartBounds}
+// Returns {document, missingFonts, untranslated}; untranslated counts blocks
+// that have source text but no translation yet, which get no text layer.
 async function importPage(client, pageName, options) {
   const data = await client.page(pageName);
   const original = await client.image(pageName, "original");
@@ -453,6 +474,8 @@ async function importPage(client, pageName, options) {
     }], {});
     if (inpainted) await addImageLayer(doc, inpainted, "[BT] Clean Inpaint", true);
     if (mask) await addImageLayer(doc, mask, "[BT] Text Mask", false);
+
+    if (options.originalText) await addSourceTextLayers(doc, data.blocks);
 
     const blocks = data.bases.map((base) => Object.assign({}, base));
     const layers = [];
@@ -479,7 +502,10 @@ async function importPage(client, pageName, options) {
       page: pageName,
       blocks: blocks
     });
-    return { document: doc, missingFonts: Array.from(missingFonts) };
+    const untranslated = data.blocks.filter(
+      (block) => !block.translation && block.text.join("").trim()
+    ).length;
+    return { document: doc, missingFonts: Array.from(missingFonts), untranslated: untranslated };
   }, { commandName: "Import from BallonsTranslator" });
 }
 

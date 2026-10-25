@@ -20,6 +20,8 @@ const STRINGS = {
     none: "None",
     optInpainted: "Clean plate (inpainted)",
     optMask: "Text mask (hidden)",
+    optSource: "Source text layers (hidden)",
+    untranslated: "{count} block(s) have no translation yet, so they got no text layer. Translate them in BallonsTranslator, then import again.",
     optStroke: "Text stroke",
     optCenter: "Center text vertically",
     optSmart: "Widen narrow vertical boxes",
@@ -50,6 +52,8 @@ const STRINGS = {
     none: "Снять",
     optInpainted: "Чистый слой (inpainted)",
     optMask: "Маска текста (скрыта)",
+    optSource: "Слои с исходным текстом (скрыты)",
+    untranslated: "У блоков без перевода ({count}) нет текстового слоя. Переведите их в BallonsTranslator и импортируйте снова.",
     optStroke: "Обводка текста",
     optCenter: "Центрировать текст по вертикали",
     optSmart: "Расширять узкие вертикальные рамки",
@@ -179,19 +183,23 @@ function onImport() {
     const options = {
       inpainted: $("opt-inpainted").checked,
       mask: $("opt-mask").checked,
+      originalText: $("opt-source").checked,
       stroke: $("opt-stroke").checked,
       verticalCenter: $("opt-center").checked,
       smartBounds: $("opt-smart").checked
     };
     const missing = new Set();
+    let untranslated = 0;
     for (const page of pages) {
       showMessage(t("importing", { page: page }));
       const result = await bt.importPage(client, page, options);
       result.missingFonts.forEach((font) => missing.add(font));
+      untranslated += result.untranslated;
     }
     let text = t("imported", { count: pages.length });
+    if (untranslated) text += "\n" + t("untranslated", { count: untranslated });
     if (missing.size) text += "\n" + t("missingFonts", { fonts: Array.from(missing).join(", ") });
-    showMessage(text, "ok");
+    showMessage(text, untranslated ? "error" : "ok");
   });
 }
 
@@ -218,6 +226,7 @@ function setupTexts() {
   $("select-none").textContent = t("none");
   $("opt-inpainted").textContent = t("optInpainted");
   $("opt-mask").textContent = t("optMask");
+  $("opt-source").textContent = t("optSource");
   $("opt-stroke").textContent = t("optStroke");
   $("opt-center").textContent = t("optCenter");
   $("opt-smart").textContent = t("optSmart");
