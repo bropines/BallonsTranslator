@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  /* UXP lays out Spectrum widgets inline; rows and columns come from flex
+     containers, never from display:block on the widgets themselves. */
+  body { padding: 12px; color: var(--uxp-host-text-color); }
+  .row { display: flex; flex-direction: row; align-items: center; }
+  .column { display: flex; flex-direction: column; }
+  .section { margin-top: 14px; }
+  .buttons sp-action-button { margin-right: 4px; }
+  #status-dot { width: 8px; height: 8px; border-radius: 4px; margin-right: 8px; background-color: gray; }
+  #status-dot.ok { background-color: rgb(76, 175, 80); }
+  #status-dot.warn { background-color: rgb(255, 160, 0); }
+  #status-dot.error { background-color: rgb(244, 67, 54); }
+  #connect { margin-top: 8px; }
+  #pages {
+    max-height: 168px;
+    overflow-y: auto;
+    margin: 6px 0;
+    padding: 2px 8px;
+    border: 1px solid var(--uxp-host-border-color);
+    border-radius: 4px;
+  }
+  .options { margin: 4px 0 8px 0; }
+  #message { margin-top: 12px; }
+  #message.error { color: rgb(244, 67, 54); }
+  #message.ok { color: rgb(76, 175, 80); }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+  <div class="row">
+    <div id="status-dot"></div>
+    <sp-body size="S" id="status-text"></sp-body>
+  </div>
+  <sp-button size="s" variant="primary" id="connect" class="hidden"></sp-button>
+
+  <div id="project-section" class="column hidden">
+    <div class="section column">
+      <sp-heading size="XXS" id="import-heading"></sp-heading>
+      <div class="row buttons">
+        <sp-action-button size="s" quiet id="select-current"></sp-action-button>
+        <sp-action-button size="s" quiet id="select-all"></sp-action-button>
+        <sp-action-button size="s" quiet id="select-none"></sp-action-button>
+      </div>
+      <div id="pages" class="column"></div>
+      <div class="options column">
+        <sp-checkbox id="opt-inpainted" checked></sp-checkbox>
+        <sp-checkbox id="opt-mask" checked></sp-checkbox>
+        <sp-checkbox id="opt-stroke" checked></sp-checkbox>
+        <sp-checkbox id="opt-center" checked></sp-checkbox>
+        <sp-checkbox id="opt-smart" checked></sp-checkbox>
+      </div>
+      <div class="row">
+        <sp-button size="s" variant="cta" id="import"></sp-button>
+      </div>
+    </div>
+
+    <div class="section column">
+      <sp-heading size="XXS" id="send-heading"></sp-heading>
+      <sp-body size="S" id="send-note"></sp-body>
+      <div class="row">
+        <sp-button size="s" variant="cta" id="send"></sp-button>
+      </div>
+    </div>
+  </div>
+
+  <sp-body size="S" id="message"></sp-body>
+  <script src="main.js"></script>
+</body>
+</html>

@@ -53,9 +53,9 @@ from ballontranslator.utils.logger import logger as LOGGER
 from ballontranslator.utils.message import create_info_dialog
 from .ps_bridge_dialog import (
     PhotoshopBridgeUpdateError,
-    _json_value,
     _project_page_blocks,
     _tr,
+    bridge_block_rect,
     consume_photoshop_bridge_update,
     photoshop_bridge_block_snapshot,
     photoshop_bridge_update_path,
@@ -158,6 +158,35 @@ def bridge_status(window: Any) -> Dict[str, Any]:
     }
 
 
+def bridge_block_style(block: Any) -> Dict[str, Any]:
+    """Return how a block looks, in image pixels, for a panel to draw it.
+
+    >>> from ballontranslator.utils.textblock import TextBlock
+    >>> block = TextBlock(xyxy=[0, 0, 10, 10])
+    >>> block.font_size, block.stroke_width = 30, 0.2
+    >>> bridge_block_style(block)["stroke"]["width"]
+    3.0
+    """
+    fmt = block.fontformat
+    size = float(fmt.font_size)
+    stroke = None
+    if fmt.stroke_width > 0:
+        # The app strokes glyph outlines with a pen this wide relative to the
+        # font size; half of it shows outside the letters.
+        stroke = {"width": size * fmt.stroke_width / 2, "color": list(fmt.srgb)}
+    return {
+        "font_family": fmt.font_family,
+        "font_size": size,
+        "bold": int(fmt.font_weight or 400) >= 600,
+        "italic": bool(fmt.italic),
+        "color": list(fmt.frgb),
+        # 0 left, 1 center, 2 right
+        "alignment": fmt.alignment,
+        "vertical": bool(fmt.vertical),
+        "stroke": stroke,
+    }
+
+
 def bridge_page(window: Any, page_name: Optional[str]) -> Dict[str, Any]:
     project = _open_project(window)
     blocks = _require_page(project, page_name)
@@ -170,7 +199,15 @@ def bridge_page(window: Any, page_name: Optional[str]) -> Dict[str, Any]:
     return {
         "project_path": project.proj_path,
         "page": page_name,
-        "blocks": [_json_value(block.to_dict()) for block in blocks],
+        "blocks": [
+            {
+                "translation": block.translation,
+                "text": list(block.text),
+                "rect": [float(value) for value in bridge_block_rect(block)],
+                "style": bridge_block_style(block),
+            }
+            for block in blocks
+        ],
         "bases": [photoshop_bridge_block_snapshot(block) for block in blocks],
     }
 

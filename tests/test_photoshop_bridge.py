@@ -1,5 +1,6 @@
 import json
 import os
+import zipfile
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -20,14 +21,20 @@ from qtpy.QtWidgets import (
 from ballontranslator.ui.mainwindow import MainWindow
 from ballontranslator.ui.ps_bridge_dialog import (
     PhotoshopBridgeDialog,
+    PanelInstaller,
     PhotoshopBridgeUpdateError,
+    build_panel_package,
+    bundled_panel_version,
     consume_photoshop_bridge_update,
+    installed_panel_version,
+    panel_install_command,
     get_photoshop_paths,
     photoshop_bridge_block_snapshot,
     project_state_matches_disk,
     validate_photoshop_bridge_updates,
 )
 from ballontranslator.ui.ps_bridge_server import PhotoshopBridgeService
+from ballontranslator.utils.config import PS_BRIDGE_PORTS
 from ballontranslator.utils.proj_imgtrans import ProjImgTrans, TextBlkEncoder
 from ballontranslator.utils.textblock import TextBlock
 
@@ -160,7 +167,7 @@ class PhotoshopBridgeTest(unittest.TestCase):
         payload["updates"][0].update(
             translation=block.translation,
             font_size=None,
-            font_family="Bebas Neue",
+            font={"family": "Bebas Neue", "bold": True, "italic": False},
             box_delta=[5, -2, 5, 8],
         )
         fake_window = SimpleNamespace(
@@ -179,6 +186,7 @@ class PhotoshopBridgeTest(unittest.TestCase):
         self.assertEqual(count, 1)
         self.assertEqual(block.translation, "three")
         self.assertEqual(block.font_family, "Bebas Neue")
+        self.assertEqual((block.fontformat.font_weight, block.fontformat.italic), (700, False))
         self.assertEqual(block._bounding_rect, [45, -2, 10, 20])
         self.assertEqual(block.xyxy, [45, -2, 55, 18])
 
@@ -494,6 +502,54 @@ class PhotoshopBridgeTest(unittest.TestCase):
         self.assertGreaterEqual(label.height(), label.heightForWidth(label.width()))
         dialog.hide()
         dialog.deleteLater()
+
+    def test_panel_package_holds_the_panel_files(self) -> None:
+        package = build_panel_package(self.temp_dir.name)
+
+        with zipfile.ZipFile(package) as archive:
+            names = set(archive.namelist())
+            manifest = json.loads(archive.read("manifest.json"))
+        self.assertTrue({"manifest.json", "index.html", "main.js", "core.js"} <= names)
+        self.assertEqual(manifest["version"], bundled_panel_version())
+        # The panel must be allowed to reach every port the app may use.
+        domains = manifest["requiredPermissions"]["network"]["domains"]
+        self.assertEqual(domains, [f"http://localhost:{port}" for port in PS_BRIDGE_PORTS])
+
+    def test_newest_installed_panel_version_is_found(self) -> None:
+        plugins = os.path.join(self.temp_dir.name, "Adobe", "UXP", "Plugins", "External")
+        for name in ("com.ballonstranslator.psbridge_1.0.9", "com.ballonstranslator.psbridge_1.0.10",
+                     "com.other.plugin_9.0.0"):
+            os.makedirs(os.path.join(plugins, name))
+        with patch("ballontranslator.ui.ps_bridge_dialog.sys.platform", "win32"), patch.dict(
+            os.environ, {"APPDATA": self.temp_dir.name}
+        ):
+            self.assertEqual(installed_panel_version(), "1.0.10")
+
+    def test_panel_install_command_follows_the_platform(self) -> None:
+        with patch("ballontranslator.ui.ps_bridge_dialog.os.path.exists", return_value=True):
+            with patch("ballontranslator.ui.ps_bridge_dialog.sys.platform", "win32"):
+                self.assertEqual(panel_install_command("p.ccx")[1:], ["/install", "p.ccx"])
+            with patch("ballontranslator.ui.ps_bridge_dialog.sys.platform", "darwin"):
+                self.assertEqual(panel_install_command("p.ccx")[1:], ["--install", "p.ccx"])
+        with patch("ballontranslator.ui.ps_bridge_dialog.os.path.exists", return_value=False):
+            self.assertIsNone(panel_install_command("p.ccx"))
+
+    def test_panel_installer_reports_adobe_installer_results(self) -> None:
+        installer = PanelInstaller()
+        results = []
+        installer.finished.connect(lambda ok, message: results.append((ok, message)))
+        outputs = [
+            "Installing extension\nInstallation Successful for extension\n",
+            "Installing extension\nFailed to install, status = -642!\n",
+        ]
+        for output in outputs:
+            with patch(
+                "ballontranslator.ui.ps_bridge_dialog.subprocess.run",
+                return_value=SimpleNamespace(stdout=output, stderr="", returncode=0),
+            ):
+                installer._run(["installer", "/install", "p.ccx"])
+        self.app.processEvents()
+        self.assertEqual(results, [(True, ""), (False, "Failed to install, status = -642!")])
 
     def test_status_is_not_clipped_with_macos_form_layout(self) -> None:
         class MacFormStyle(QProxyStyle):

@@ -8,7 +8,9 @@ import math
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
+import zipfile
 from typing import Any, Callable, List, NamedTuple, Optional, Tuple
 
 from qtpy.QtWidgets import (
@@ -24,7 +26,7 @@ from qtpy.QtWidgets import (
     QMessageBox,
     QSizePolicy,
 )
-from qtpy.QtCore import QCoreApplication, Qt, QTimer
+from qtpy.QtCore import QCoreApplication, QObject, Qt, QTimer, Signal
 from qtpy.QtGui import QHideEvent, QShowEvent
 
 from ballontranslator.utils.config import PS_BRIDGE_PORTS, pcfg
@@ -71,7 +73,7 @@ def normalize_bridge_text(text: str) -> str:
 
 
 # Fields an update writes; each must still hold what Photoshop received.
-BRIDGE_WRITABLE_FIELDS = ("translation", "font_size", "font_family")
+BRIDGE_WRITABLE_FIELDS = ("translation", "font_size", "font")
 # Fields that tell whether a block number still means the same block.
 BRIDGE_IDENTITY_FIELDS = ("text", "xyxy")
 
@@ -88,10 +90,28 @@ def photoshop_bridge_block_snapshot(block: TextBlock) -> dict:
     return {
         "translation": block_data.get("translation", ""),
         "font_size": fontformat.get("font_size"),
-        "font_family": fontformat.get("font_family"),
+        "font": {
+            "family": fontformat.get("font_family"),
+            "bold": int(fontformat.get("font_weight") or 400) >= 600,
+            "italic": bool(fontformat.get("italic")),
+        },
         "text": block_data.get("text", []),
         "xyxy": block_data.get("xyxy", []),
     }
+
+
+def bridge_block_rect(block: TextBlock) -> List[float]:
+    """Return the text box as ``[x, y, width, height]``.
+
+    Blocks without text lines or a saved box fall back to the detection box.
+
+    >>> bridge_block_rect(TextBlock(xyxy=[1, 2, 11, 7]))
+    [1, 2, 10, 5]
+    """
+    if block._bounding_rect is None and not block.lines:
+        x1, y1, x2, y2 = block.xyxy
+        return [x1, y1, x2 - x1, y2 - y1]
+    return list(block.bounding_rect())
 
 
 class BridgeBlockUpdate(NamedTuple):
@@ -100,7 +120,8 @@ class BridgeBlockUpdate(NamedTuple):
     block: TextBlock
     translation: str
     font_size: Optional[float]
-    font_family: Optional[str]
+    # {"family": str, "bold": bool, "italic": bool}
+    font: Optional[dict]
     # Moves of the left, top, right and bottom edges of the text box.
     box_delta: Optional[Tuple[float, float, float, float]]
 
@@ -277,9 +298,13 @@ def validate_photoshop_bridge_updates(
             raise PhotoshopBridgeUpdateError(
                 f"Block #{block_index + 1} has an invalid font size."
             )
-        font_family = update.get("font_family")
-        if font_family is not None and (
-            not isinstance(font_family, str) or not font_family.strip()
+        font = update.get("font")
+        if font is not None and not (
+            isinstance(font, dict)
+            and isinstance(font.get("family"), str)
+            and font["family"].strip()
+            and isinstance(font.get("bold"), bool)
+            and isinstance(font.get("italic"), bool)
         ):
             raise PhotoshopBridgeUpdateError(
                 f"Block #{block_index + 1} has an invalid font."
@@ -300,8 +325,7 @@ def validate_photoshop_bridge_updates(
             ),
             "font_size": font_size is not None
             and not bridge_values_match(font_size, base.get("font_size")),
-            "font_family": font_family is not None
-            and font_family != base.get("font_family"),
+            "font": font is not None and font != base.get("font"),
         }
         conflicts = [
             key for key in BRIDGE_WRITABLE_FIELDS
@@ -310,7 +334,7 @@ def validate_photoshop_bridge_updates(
             )
         ]
         if conflicts:
-            names = {"translation": "text", "font_size": "font size", "font_family": "font"}
+            names = {"translation": "text", "font_size": "font size", "font": "font"}
             fields = ", ".join(names[key] for key in conflicts)
             raise PhotoshopBridgeUpdateError(
                 f"Block #{block_index + 1} on page '{page_name}' was edited in "
@@ -322,7 +346,7 @@ def validate_photoshop_bridge_updates(
                 block,
                 translation,
                 font_size if written["font_size"] else None,
-                font_family if written["font_family"] else None,
+                dict(font) if written["font"] else None,
                 tuple(box_delta) if box_delta is not None and any(box_delta) else None,
             )
         )
@@ -532,6 +556,107 @@ def photoshop_script_command(exe_path: str, jsx_path: str) -> List[str]:
     ]
 
 
+PANEL_ID = "com.ballonstranslator.psbridge"
+# Adobe's plugin installer; Creative Cloud installs it with Photoshop.
+UPIA_PATHS = {
+    "win32": (
+        r"C:\Program Files\Common Files\Adobe\Adobe Desktop Common\RemoteComponents"
+        r"\UPI\UnifiedPluginInstallerAgent\UnifiedPluginInstallerAgent.exe"
+    ),
+    "darwin": (
+        "/Library/Application Support/Adobe/Adobe Desktop Common/RemoteComponents/UPI/"
+        "UnifiedPluginInstallerAgent/UnifiedPluginInstallerAgent.app/Contents/MacOS/"
+        "UnifiedPluginInstallerAgent"
+    ),
+}
+
+
+def panel_source_dir() -> str:
+    return os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "scripts", "export to photoshop", "panel",
+    )
+
+
+def _version_key(version: str) -> Tuple[int, ...]:
+    return tuple(int(part) for part in re.findall(r"\d+", version))
+
+
+def bundled_panel_version() -> str:
+    try:
+        with open(os.path.join(panel_source_dir(), "manifest.json"), "r", encoding="utf-8") as manifest:
+            return str(json.load(manifest).get("version", ""))
+    except (OSError, ValueError):
+        return ""
+
+
+def installed_panel_version() -> str:
+    """Return the newest installed panel version, or "" when none is installed.
+
+    Adobe's installer unpacks plugins into ``<id>_<version>`` folders.
+    """
+    if sys.platform == "win32":
+        root = os.path.join(os.environ.get("APPDATA", ""), "Adobe", "UXP", "Plugins", "External")
+    elif sys.platform == "darwin":
+        root = os.path.expanduser("~/Library/Application Support/Adobe/UXP/Plugins/External")
+    else:
+        return ""
+    prefix = PANEL_ID + "_"
+    try:
+        versions = [name[len(prefix):] for name in os.listdir(root) if name.startswith(prefix)]
+    except OSError:
+        return ""
+    return max(versions, key=_version_key, default="")
+
+
+def build_panel_package(dest_dir: str) -> str:
+    """Zip the panel folder into an installable ``.ccx`` file."""
+    version = bundled_panel_version()
+    package = os.path.join(dest_dir, f"BallonsTranslator_Photoshop_Panel_{version}.ccx")
+    source = panel_source_dir()
+    with zipfile.ZipFile(package, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name in sorted(os.listdir(source)):
+            path = os.path.join(source, name)
+            if os.path.isfile(path):
+                archive.write(path, name)
+    return package
+
+
+def panel_install_command(package: str) -> Optional[List[str]]:
+    """Return the Adobe installer command, or None when it is not installed."""
+    installer = UPIA_PATHS.get(sys.platform)
+    if not installer or not os.path.exists(installer):
+        return None
+    switch = "/install" if sys.platform == "win32" else "--install"
+    return [installer, switch, package]
+
+
+class PanelInstaller(QObject):
+    """Install the panel package off the main thread.
+
+    Adobe's installer can wait minutes for Creative Cloud, which may ask the
+    user to confirm a plugin from outside the Adobe marketplace.
+    """
+
+    finished = Signal(bool, str)
+
+    def start(self, command: List[str]) -> None:
+        threading.Thread(target=self._run, args=(command,), daemon=True).start()
+
+    def _run(self, command: List[str]) -> None:
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=600)
+            output = (result.stdout or "") + (result.stderr or "")
+        except (OSError, subprocess.TimeoutExpired) as error:
+            self.finished.emit(False, str(error))
+            return
+        if "Installation Successful" in output:
+            self.finished.emit(True, "")
+        else:
+            lines = [line for line in output.splitlines() if line.strip()]
+            self.finished.emit(False, lines[-1] if lines else f"exit code {result.returncode}")
+
+
 def extract_jsx_version(jsx_path: str) -> str:
     """Read version metadata from a JSX script header."""
     if not jsx_path or not os.path.isfile(jsx_path):
@@ -704,6 +829,17 @@ class PhotoshopBridgeDialog(QDialog):
         live_layout.setSpacing(8)
         live_layout.setContentsMargins(12, 12, 12, 12)
 
+        panel_row = QHBoxLayout()
+        self.panel_status_label = QLabel()
+        self.panel_status_label.setWordWrap(True)
+        panel_row.addWidget(self.panel_status_label, 1)
+        self.install_panel_btn = QPushButton(self.tr("Install Panel"))
+        self.install_panel_btn.clicked.connect(self.on_install_panel)
+        panel_row.addWidget(self.install_panel_btn)
+        live_layout.addRow(QLabel(self.tr("Panel:")), panel_row)
+        self._panel_installer = PanelInstaller(self)
+        self._panel_installer.finished.connect(self.on_panel_installed)
+
         self.live_checkbox = QCheckBox(
             self.tr("Allow the Photoshop panel to connect (this computer only)")
         )
@@ -794,6 +930,7 @@ class PhotoshopBridgeDialog(QDialog):
             )
             self.install_btn.setText(self.tr("Install Script in Photoshop"))
 
+        self._sync_panel_status()
         self._schedule_status_fit()
         self.check_for_update()
 
@@ -841,6 +978,67 @@ class PhotoshopBridgeDialog(QDialog):
         state, message = result
         colors = {"applied": "#4CAF50", "rejected": "#F44336"}
         self._set_sync_status(message, colors.get(state, "#FFA000"))
+
+    def _sync_panel_status(self) -> None:
+        bundled = bundled_panel_version()
+        installed = installed_panel_version()
+        if not installed:
+            text = self.tr("Not installed (v{version} available)").format(version=bundled)
+            color, button = "#F44336", self.tr("Install Panel")
+        elif _version_key(installed) < _version_key(bundled):
+            text = self.tr("Update available (v{old} -> v{new})").format(old=installed, new=bundled)
+            color, button = "#FFA000", self.tr("Update Panel")
+        else:
+            text = self.tr("Installed (v{version})").format(version=installed)
+            color, button = "#4CAF50", self.tr("Reinstall Panel")
+        self.panel_status_label.setText(text)
+        self.panel_status_label.setStyleSheet(f"background: transparent; color: {color};")
+        self.install_panel_btn.setText(button)
+
+    def on_install_panel(self) -> None:
+        # Installing the panel means the user wants it to connect.
+        if not pcfg.ps_bridge.live_enabled:
+            self.live_checkbox.setChecked(True)
+        try:
+            package = build_panel_package(tempfile.gettempdir())
+        except OSError as error:
+            QMessageBox.warning(self, self.tr("Error"), str(error))
+            return
+        command = panel_install_command(package)
+        if command is None:
+            # Creative Cloud installs .ccx files it is asked to open.
+            open_with_system(package)
+            self.panel_status_label.setText(
+                self.tr("Finish the installation in Creative Cloud, then restart Photoshop.")
+            )
+            return
+        self.install_panel_btn.setEnabled(False)
+        self.panel_status_label.setText(
+            self.tr("Installing... Creative Cloud may ask you to confirm.")
+        )
+        self.panel_status_label.setStyleSheet("background: transparent; color: #FFA000;")
+        self._schedule_status_fit()
+        self._panel_installer.start(command)
+
+    def on_panel_installed(self, success: bool, message: str) -> None:
+        self.install_panel_btn.setEnabled(True)
+        self._sync_panel_status()
+        if success:
+            QMessageBox.information(
+                self,
+                self.tr("Photoshop Panel"),
+                self.tr(
+                    "The panel is installed. Restart Photoshop and open it from "
+                    "Plugins > BallonsTranslator."
+                ),
+            )
+        else:
+            LOGGER.warning("Photoshop panel installation failed: %s", message)
+            self.panel_status_label.setText(
+                self.tr("Installation failed: {error}").format(error=message)
+            )
+            self.panel_status_label.setStyleSheet("background: transparent; color: #F44336;")
+        self._schedule_status_fit()
 
     def _bridge_service(self) -> Any:
         return getattr(self.parent(), "ps_bridge", None)

@@ -1,0 +1,30 @@
+{
+  "manifestVersion": 5,
+  "id": "com.ballonstranslator.psbridge",
+  "name": "BallonsTranslator",
+  "version": "1.0.0",
+  "main": "index.html",
+  "host": { "app": "PS", "minVersion": "25.0.0" },
+  "entrypoints": [
+    {
+      "type": "panel",
+      "id": "btPanel",
+      "label": { "default": "BallonsTranslator" },
+      "minimumSize": { "width": 240, "height": 320 },
+      "maximumSize": { "width": 2000, "height": 2000 },
+      "preferredDockedSize": { "width": 300, "height": 520 },
+      "preferredFloatingSize": { "width": 320, "height": 560 }
+    }
+  ],
+  "requiredPermissions": {
+    "network": {
+      "domains": [
+        "http://localhost:19871",
+        "http://localhost:19872",
+        "http://localhost:19873",
+        "http://localhost:19874",
+        "http://localhost:19875"
+      ]
+    }
+  }
+}

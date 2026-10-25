@@ -1293,6 +1293,7 @@ class MainWindow(mainwindow_cls):
     def apply_photoshop_bridge_updates(self, payload: dict) -> int:
         """Validate and persist Photoshop changes through project ownership."""
         from .ps_bridge_dialog import (
+            bridge_block_rect,
             project_state_matches_disk,
             validate_photoshop_bridge_updates,
         )
@@ -1320,7 +1321,7 @@ class MainWindow(mainwindow_cls):
             update for update in updates
             if update.block.translation != update.translation
             or update.font_size is not None
-            or update.font_family is not None
+            or update.font is not None
             or update.box_delta is not None
         ]
         if not changed:
@@ -1346,13 +1347,15 @@ class MainWindow(mainwindow_cls):
                 block.rich_text = ""
             if update.font_size is not None:
                 block.font_size = update.font_size
-            if update.font_family is not None:
-                block.font_family = update.font_family
-                if block.rich_text:
-                    block.rich_text = set_html_family(block.rich_text, update.font_family)
+            if update.font is not None:
+                block.font_family = update.font["family"]
+                block.fontformat.font_weight = 700 if update.font["bold"] else 400
+                block.fontformat.italic = update.font["italic"]
+                # Rich HTML carries its own font per run and would keep the old one.
+                block.rich_text = ""
             if update.box_delta is not None:
                 left, top, right, bottom = update.box_delta
-                x, y, width, height = block.bounding_rect()
+                x, y, width, height = bridge_block_rect(block)
                 block._bounding_rect = [
                     x + left,
                     y + top,
