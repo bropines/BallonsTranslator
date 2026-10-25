@@ -29,6 +29,19 @@ Advanced bidirectional bridge between **BallonsTranslator** and **Adobe Photosho
 
 ---
 
+## Photoshop Panel (Photoshop 2024 and newer)
+
+The panel lives inside Photoshop and talks to the running BallonsTranslator directly: no project files to pick, no scripts to run.
+
+1. In BallonsTranslator open **Tools -> Photoshop Bridge** and click **Install Panel**. Confirm in Creative Cloud if it asks. This also turns on **Allow the Photoshop panel to connect**.
+2. Restart Photoshop and open **Plugins -> BallonsTranslator**.
+3. Click **Connect** in the panel and allow it in BallonsTranslator.
+4. Pick pages and click **Import**. Edit text, size, font or box position in Photoshop, then click **Send Changes**.
+
+Save unsaved work in BallonsTranslator before importing or sending. The imported document is a temporary copy: use **File -> Save As** to keep a PSD.
+
+## Script (all Photoshop versions)
+
 ## Installation
 
 ### Method 1: Via BallonsTranslator UI (Recommended)

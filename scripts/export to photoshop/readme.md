@@ -1,6 +1,6 @@
 # Photoshop Bridge & Integration Guide for AI Agents
 
-This document is the single source of truth for the **BallonsTranslator Photoshop Bridge** (`BallonTranslator_PS_Bridge.jsx`) and its integration tools in `scripts/export to photoshop/` and `ballontranslator/ui/ps_bridge_dialog.py`.
+This document is the single source of truth for the **BallonsTranslator Photoshop Bridge**: the Photoshop panel (`panel/`, UXP), the script (`BallonTranslator_PS_Bridge.jsx`, ExtendScript, for Photoshop versions without the panel) and the app side in `ballontranslator/ui/ps_bridge_dialog.py` and `ballontranslator/ui/ps_bridge_server.py`.
 
 ---
 
@@ -15,7 +15,12 @@ BallonsTranslator (Qt UI)
    │         ├─ One-click launcher: Launches photoshop.exe with -r script
    │         └─ Installer: Non-elevated JSX copy with manual fallback
    │
+   ├─ PhotoshopBridgeService (ballontranslator/ui/ps_bridge_server.py)
+   │    ├─ Applies update files the script leaves next to the project
+   │    └─ Local HTTP API for the panel (off by default)
+   │
    └─ scripts/export to photoshop/
+        ├─ panel/ (UXP panel: manifest.json, index.html, main.js UI, core.js logic)
         ├─ BallonTranslator_PS_Bridge.jsx (Standalone ExtendScript v2.5+)
         └─ install_manual.md (User guide)
 ```
@@ -25,9 +30,16 @@ BallonsTranslator (Qt UI)
 ## Round-Trip Sync Contract
 
 - **Page state in the PSD.** Import writes XMP property `state` in namespace `http://github.com/dmMaze/BallonsTranslator/ns/psbridge/1.0/`: `{version: 1, project_path, page, blocks}`. `blocks[i]` holds the values block `i` had when Photoshop received it. Send Changes reads this instead of matching document names, and after a send stores the sent values so the next send compares against them. Documents without it fall back to name matching and the project file on disk. Shift+Enter line breaks arrive as `\u0003` and are turned into `\n` on both sides.
-- **Compared fields.** `getBlockBase()` in the JSX and `photoshop_bridge_block_snapshot()` in `ps_bridge_dialog.py` must list the same fields: `translation` and `font_size` (what Photoshop overwrites) plus `text` and `xyxy` (block identity). Rich text and the text box are excluded because saving a page regenerates them.
-- **Update file.** Photoshop writes `<project>.json.ps_bridge_updates.json` next to the project, one pending set at a time. `PhotoshopBridgeUpdatePoller` checks for it every 1.5 s and applies it; the bridge window shows the result while visible. Unsaved changes keep it pending; a conflict renames it to `*.ps_bridge_updates.rejected.json`.
+- **Conflict checks.** `photoshop_bridge_block_snapshot()` lists the base values: `translation`, `font_size`, `font` (`{family, bold, italic}`), `text` and `xyxy`. A block number still means the same block if its source text or its detection box is unchanged (moving a box in the app moves the detection box). Each field an update changes must still hold the base value; fields it leaves alone may have changed. Box changes arrive as `box_delta` (edge moves) and apply to the current box, so they never conflict. Rich text and the text box are not compared because saving a page regenerates them. `getBlockBase()` in the JSX sends the subset the script can change.
+- **Update file.** Photoshop writes `<project>.json.ps_bridge_updates.json` next to the project, one pending set at a time. `PhotoshopBridgeService` checks for it every 1.5 s and applies it; the bridge window shows the result while visible. Unsaved changes keep it pending; a conflict renames it to `*.ps_bridge_updates.rejected.json`.
 - **Launch context.** **Open This Project in Photoshop** saves the project and writes `bt_ps_bridge_context.json` (project path and active page) to the temp folder; the script uses it if it is less than 5 minutes old.
+
+## Photoshop Panel (UXP)
+
+- **Connection.** `PhotoshopBridgeService` serves `/api/v1/` (see the module docstring of `ps_bridge_server.py`) on localhost, on both 127.0.0.1 and ::1: Photoshop resolves `localhost` to ::1 on macOS. The port is one of `PS_BRIDGE_PORTS` (19871-19875); `manifest.json` must list each as `http://localhost:<port>` (UXP rejects IP addresses there). The panel finds the app by the `Server: BallonsTranslatorBridge` header, pairs through `POST pair` (the user confirms in the app) and stores the token in `localStorage`.
+- **Import.** The page endpoint gives each block's text box and look in image pixels (`bridge_block_style()`), so the panel needs no knowledge of app internals. Text layers are paragraph boxes made with `batchPlay`. The page state goes into the same XMP property as the script's, plus `blocks[i].layer = {font, frame}` so Send Changes can detect font changes and box moves.
+- **Install.** The bridge window zips `panel/` into a `.ccx` and runs Adobe's installer (`/install` on Windows, `--install` on macOS). Creative Cloud may ask the user to confirm, and on Windows it accepts installs only from the user's own session. Reinstalling the same version does not replace files: bump `version` in `manifest.json` with every panel change.
+- **UXP gotchas.** `textClickPoint` is read in percent of the document size. The Background layer cannot be renamed; `set` it into a normal layer. `Layer.translate()` moves the whole selection. `textItem.characterStyle.size` is in pixels, `textKey` sizes and bounds are in points (72 per inch). `eval` and `new Function` are not allowed.
 
 ---
 
