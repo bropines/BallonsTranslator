@@ -1,10 +1,10 @@
 // BallonTranslator_PS_Bridge.jsx
-// Version: 2.6.2
+// Version: 2.6.3
 // Multilingual Bidirectional Bridge between BallonsTranslator and Adobe Photoshop (CC 2019 - CC 2026+)
 
 #target photoshop
 
-var BT_BRIDGE_VERSION = "2.6.2";
+var BT_BRIDGE_VERSION = "2.6.3";
 
 
 
@@ -280,9 +280,11 @@ var BT_PS = (function () {
         if (!strokeWidthPx || strokeWidthPx <= 0) return;
         try {
             app.activeDocument.activeLayer = layer;
-            var posKey = "OutF"; // Outside
-            if (position === "inside") posKey = "InsF";
-            else if (position === "center") posKey = "CtrF";
+            // stringIDToTypeID needs string IDs. The four-letter "InsF"-style
+            // codes are char IDs, so Photoshop fell back to an outside stroke.
+            var posKey = "outsetFrame";
+            if (position === "inside") posKey = "insetFrame";
+            else if (position === "center") posKey = "centeredFrame";
 
             var desc = new ActionDescriptor();
             var ref = new ActionReference();
@@ -295,7 +297,7 @@ var BT_PS = (function () {
             strokeDesc.putBoolean(s2t("present"), true);
             strokeDesc.putBoolean(s2t("showInDialog"), true);
             strokeDesc.putEnumerated(s2t("style"), s2t("frameStyle"), s2t(posKey));
-            strokeDesc.putEnumerated(s2t("paintType"), s2t("fillFrameStyle"), s2t("solidColorLayer"));
+            strokeDesc.putEnumerated(s2t("paintType"), s2t("frameFill"), s2t("solidColor"));
 
             var colorDesc = new ActionDescriptor();
             colorDesc.putDouble(s2t("red"), (r !== undefined) ? r : 255);
@@ -1282,7 +1284,11 @@ function runBallonTranslatorBridge() {
                     }
 
                     // Stroke / Outline Layer Effect (ActionManager)
-                    var strokeWidth = (fmt.stroke_width !== undefined) ? fmt.stroke_width : (blk.stroke_width || 0);
+                    // BallonsTranslator stores the stroke width as a fraction of the
+                    // font size and strokes the outline with a pen that wide, so
+                    // half of it shows outside the letters.
+                    var strokeRatio = (fmt.stroke_width !== undefined) ? fmt.stroke_width : (blk.stroke_width || 0);
+                    var strokeWidth = strokeRatio > 0 ? fontSize * strokeRatio / 2 : 0;
                     var srgb = fmt.srgb || [255, 255, 255];
                     if (chkStroke.value) {
                         if (strokeWidth <= 0) {
